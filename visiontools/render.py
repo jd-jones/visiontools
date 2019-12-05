@@ -151,23 +151,28 @@ class NeuralRenderer(nr.Renderer):
             R = R[None, :, :].float().cuda()
             t = t[None, None, :].float().cuda()
 
-        # [num_vertices, XYZ] -> [batch_size=1, num_vertices, XYZ]
-        vertices = vertices[None, ...]
-        # [num_faces, 3] -> [batch_size=1, num_faces, 3]
-        faces = faces[None, ...]
-        textures = textures[None, ...]
+        if len(vertices.shape) == 2:
+            # [num_vertices, XYZ] -> [batch_size=1, num_vertices, XYZ]
+            vertices = vertices[None, ...]
 
-        # [batch_size, RGB, image_size, image_size]
+        if len(faces.shape) == 2:
+            # [num_faces, 3] -> [batch_size=1, num_faces, 3]
+            faces = faces[None, ...]
+
+        if len(textures.shape) == 5:
+            textures = textures[None, ...]
+
         images_rgb, images_depth, images_alpha = super().render(vertices, faces, textures)
-        # [image_size, image_size, RGB]
-        image_rgb = images_rgb.detach().cpu().numpy()[0].transpose((1, 2, 0))
-        image_depth = images_depth.detach().cpu().numpy()[0]
 
-        return image_rgb, image_depth
+        # [batch_size, RGB, image_size, image_size] -> [batch_size, image_size, image_size, RGB]
+        images_rgb = images_rgb.permute(0, 2, 3, 1)
+
+        return images_rgb, images_depth
 
     def renderScene(
             self, background_plane, assembly, component_poses,
-            camera_pose=None, camera_params=None, render_background=True):
+            camera_pose=None, camera_params=None, render_background=True,
+            as_numpy=False):
         """ Render a scene consisting of a spatial assembly and a background plane.
 
         Parameters
@@ -186,30 +191,42 @@ class NeuralRenderer(nr.Renderer):
         if render_background:
             vertices, faces = planeVertices(background_plane, camera_pose, camera_params)
             textures = makeTextures(faces, uniform_color=self.colors['black'])
-            vertices = (vertices,)
-            faces = (faces,)
-            textures = (textures,)
-        else:
-            vertices = tuple()
-            faces = tuple()
-            textures = tuple()
+            rgb_bkgrnd, depth_bkgrnd = self.render(vertices, faces, textures)
 
         if not assembly.blocks:
             return self.render(vertices, faces, textures)
 
         assembly = assembly.setPose(component_poses, in_place=False)
 
-        vertices = tuple(torch.tensor(v, dtype=torch.float).cuda() for v in assembly.vertices)
-        faces = tuple(torch.tensor(f, dtype=torch.int).cuda() for f in assembly.faces)
-        textures = tuple(torch.tensor(t, dtype=torch.float).cuda() for t in assembly.textures)
+        vertices = torch.stack(
+            tuple(torch.tensor(v, dtype=torch.float).cuda() for v in assembly.vertices)
+        )
+        faces = torch.stack(
+            tuple(torch.tensor(f, dtype=torch.int).cuda() for f in assembly.faces)
+        )
+        textures = torch.stack(
+            tuple(torch.tensor(t, dtype=torch.float).cuda() for t in assembly.textures)
+        )
 
-        images = tuple(self.render(v, f, t) for v, f, t in zip(vertices, faces, textures))
+        rgb_images, depth_images = self.render(vertices, faces, textures)
 
-        rgb_image, depth_image = images[0]
-        for rgb, depth in images[1:]:
-            px_is_closer = depth < depth_image
-            rgb_image[px_is_closer] = rgb[px_is_closer]
-            depth_image[px_is_closer] = depth[px_is_closer]
+        if render_background:
+            rgb_images = torch.cat((rgb_bkgrnd, rgb_images), 0)
+            depth_images = torch.cat((depth_bkgrnd, depth_images), 0)
+
+        i_min = depth_images.argmin(0)
+        num_rows, num_cols = i_min.shape
+        r, c = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols))
+        i_min = i_min.contiguous().view(-1)
+        r = r.contiguous().view(-1)
+        c = c.contiguous().view(-1)
+
+        depth_image = depth_images[i_min, r, c].view(num_rows, num_cols)
+        rgb_image = rgb_images[i_min, r, c, :].view(num_rows, num_cols, -1)
+
+        if as_numpy:
+            rgb_image = rgb_image.detach().cpu().numpy()
+            depth_image = depth_image.detach().cpu().numpy()
 
         return rgb_image, depth_image
 

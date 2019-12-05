@@ -4,7 +4,8 @@ import os
 import yaml
 import torch
 import numpy as np
-from matplotlib import pyplot as plt
+import tqdm
+import imageio
 
 from seqtools import utils
 from visiontools import render
@@ -27,21 +28,27 @@ def main(out_dir=None):
 
     background_plane = None
     assembly = labels.constructGoalState(4)
-    component_poses = (
-        (np.eye(3), np.zeros(3)),
-    )
 
-    rendered = nr.renderScene(background_plane, assembly, component_poses, render_background=False)
+    R_init = np.eye(3)
+    t_init = np.zeros(3)
+    radius = 250
+    num_frames = 90
+    loop = tqdm.tqdm(range(num_frames))
+    writer = imageio.get_writer(os.path.join(out_dir, "rendered_rgb.gif"), mode='I')
+    for num in loop:
+        loop.set_description('Drawing')
 
-    plt.figure()
-    plt.imshow(rendered[0])
-    plt.savefig(os.path.join(out_dir, f"rendered_rgb.png"))
-    plt.close()
+        angle = num * (2 * np.pi / num_frames)
+        R = R_init
+        t = t_init + radius * np.array([np.cos(angle), np.sin(angle), 0])
 
-    plt.figure()
-    plt.imshow(rendered[1])
-    plt.savefig(os.path.join(out_dir, f"rendered_depth.png"))
-    plt.close()
+        component_poses = ((R, t),)
+        rgb_image, depth_image = nr.renderScene(
+            background_plane, assembly, component_poses,
+            render_background=False, as_numpy=True
+        )
+        writer.append_data((255 * rgb_image).astype(np.uint8))
+    writer.close()
 
 
 if __name__ == "__main__":
