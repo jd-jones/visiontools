@@ -110,7 +110,7 @@ def loadCameraParams(
 intrinsic_matrix, camera_pose, object_colors = loadCameraParams()
 
 
-class NeuralRenderer(nr.Renderer):
+class TorchSceneRenderer(nr.Renderer):
     def __init__(self, intrinsic_matrix=None, camera_pose=None, colors=None, **super_kwargs):
         K = intrinsic_matrix
         K = K[None, :, :].cuda()
@@ -189,46 +189,130 @@ class NeuralRenderer(nr.Renderer):
             camera_params = self.K[0]
 
         if render_background:
-            vertices, faces = planeVertices(background_plane, camera_pose, camera_params)
-            textures = makeTextures(faces, uniform_color=self.colors['black'])
-            rgb_bkgrnd, depth_bkgrnd = self.render(vertices, faces, textures)
+            rgb_bkgrnd, depth_bkgrnd = self.renderPlane(
+                background_plane, camera_pose=camera_pose, camera_params=camera_params
+            )
 
         if not assembly.blocks:
-            return self.render(vertices, faces, textures)
+            return rgb_bkgrnd, depth_bkgrnd
 
         assembly = assembly.setPose(component_poses, in_place=False)
 
-        vertices = torch.stack(
-            tuple(torch.tensor(v, dtype=torch.float).cuda() for v in assembly.vertices)
-        )
-        faces = torch.stack(
-            tuple(torch.tensor(f, dtype=torch.int).cuda() for f in assembly.faces)
-        )
-        textures = torch.stack(
-            tuple(torch.tensor(t, dtype=torch.float).cuda() for t in assembly.textures)
-        )
+        vertices = makeBatch(assembly.vertices, dtype=torch.float).cuda()
+        faces = makeBatch(assembly.faces, dtype=torch.int).cuda()
+        textures = makeBatch(assembly.textures, dtype=torch.float).cuda()
 
         rgb_images, depth_images = self.render(vertices, faces, textures)
-
         if render_background:
             rgb_images = torch.cat((rgb_bkgrnd, rgb_images), 0)
             depth_images = torch.cat((depth_bkgrnd, depth_images), 0)
 
-        i_min = depth_images.argmin(0)
-        num_rows, num_cols = i_min.shape
-        r, c = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols))
-        i_min = i_min.contiguous().view(-1)
-        r = r.contiguous().view(-1)
-        c = c.contiguous().view(-1)
-
-        depth_image = depth_images[i_min, r, c].view(num_rows, num_cols)
-        rgb_image = rgb_images[i_min, r, c, :].view(num_rows, num_cols, -1)
+        rgb_image, depth_image = reduceByDepth(rgb_images, depth_images)
 
         if as_numpy:
             rgb_image = rgb_image.detach().cpu().numpy()
             depth_image = depth_image.detach().cpu().numpy()
 
         return rgb_image, depth_image
+
+    def renderPlane(self, plane, camera_pose=None, camera_params=None):
+        if camera_pose is None:
+            camera_pose = geometry.homogeneousMatrix(self.R[0], self.t[0][0])
+
+        if camera_params is None:
+            camera_params = self.K[0]
+
+        vertices, faces = planeVertices(plane, camera_pose, camera_params)
+        textures = makeTextures(faces, uniform_color=self.colors['black'])
+        rgb_image, depth_image = self.render(vertices, faces, textures)
+
+        return rgb_image, depth_image
+
+    def renderComponent(self, assembly, component_index, component_pose, background_images=None):
+        """
+
+        Parameters
+        ----------
+        background_images : tuple(
+            array of float, shape (img_height, img_width, 3),
+            array of shape (img_height, img_width)
+        )
+            Elements should be as follows:
+            0 --- RGB image
+            1 --- Depth image
+
+        Returns
+        -------
+        """
+
+        assembly = assembly.recenter(component_index, in_place=False)
+
+        vertices = makeBatch(assembly.componentVertices(component_index), dtype=torch.float).cuda()
+        faces = makeBatch(assembly.componentFaces(component_index), dtype=torch.int).cuda()
+        textures = makeBatch(assembly.componentTextures(component_index), dtype=torch.float).cuda()
+
+        R, t = component_pose
+        vertices = vertices @ R.T + t
+
+        rgb_images, depth_images = self.render(vertices, faces, textures)
+        if background_images is not None:
+            rgb_images = torch.cat((background_images[0], rgb_images), 0)
+            depth_images = torch.cat((background_images[1], depth_images), 0)
+
+        rgb_image, depth_image = reduceByDepth(rgb_images, depth_images)
+
+        return rgb_image, depth_image
+
+
+class LegacySceneRenderer(object):
+    def __init__(self, intrinsic_matrix=None, camera_pose=None, colors=None, **super_kwargs):
+        self.intrinsic_matrix = intrinsic_matrix
+        self.camera_pose = camera_pose
+        self.colors = colors
+
+    def renderScene(self, background_plane, assembly, component_poses):
+        out = renderScene(
+            background_plane, assembly, component_poses,
+            camera_pose=self.camera_pose, camera_params=self.intrinsic_matrix,
+            object_appearances=self.colors
+        )
+        return out
+
+    def renderPlane(self, plane):
+        out = renderPlane(
+            plane, camera_pose=None, camera_params=None, plane_appearance=None,
+            range_image=None, label_image=None, rgb_image=None
+        )
+        return out
+
+    def renderComponent(self, assembly, component_idx):
+        out = renderComponent(
+            assembly, component_idx, component_pose=None, img_type=None,
+            camera_pose=None, camera_params=None, block_colors=None,
+            range_image=None, label_image=None, rgb_image=None,
+            crop_rendered=False, in_place=True
+        )
+        return out
+
+
+# -=( HELPER FUNCTIONS FOR PYTORCH RENDERER )==--------------------------------
+def makeBatch(arrays, **tensor_kwargs):
+    batch = torch.stack(tuple(torch.tensor(a, **tensor_kwargs) for a in arrays))
+    return batch
+
+
+def reduceByDepth(rgb_images, depth_images):
+    i_min = depth_images.argmin(0)
+    num_rows, num_cols = i_min.shape
+    r, c = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols))
+    i_min = i_min.contiguous().view(-1)
+    r = r.contiguous().view(-1)
+    c = c.contiguous().view(-1)
+
+    depth_image = depth_images[i_min, r, c].view(num_rows, num_cols)
+    rgb_image = rgb_images[i_min, r, c, :].view(num_rows, num_cols, -1)
+
+    return rgb_image, depth_image
 
 
 def planeVertices(plane, intrinsic_matrix, camera_pose, img_shape=None):
@@ -287,71 +371,7 @@ def makeTextures(faces, texture_size=2, uniform_color=None):
     return textures
 
 
-def transformTemplate(
-        observed_rgb, rendered_rgb, R, t, image=None, ignore_zero=False,
-        is_depth=False, background_plane_img=None):
-    if image is None:
-        image = np.zeros_like(observed_rgb)
-
-    row_bounds = (0, rendered_rgb.shape[0] - 1)
-    col_bounds = (0, rendered_rgb.shape[1] - 1)
-    U = geometry.sampleInteriorUniform(row_bounds, col_bounds)
-    U_rows, U_cols = utils.splitColumns(U)
-
-    if ignore_zero:
-        U_pixels = np.squeeze(rendered_rgb[U_rows, U_cols], axis=1)
-        if len(U_pixels.shape) > 1:
-            U_pixels = U_pixels.sum(axis=1)
-        px_is_zero = U_pixels == 0
-        U = U[~px_is_zero]
-        U_rows, U_cols = utils.splitColumns(U)
-
-    V = geometry.computeImage(U, R, t)
-    # V = projectIntoImage(V, observed_rgb.shape[0:2])
-    V_rows, V_cols = utils.splitColumns(V)
-
-    num_rows, num_cols = image.shape[0:2]
-
-    in_rows = V_rows < num_rows
-    in_cols = V_cols < num_cols
-    in_image = in_rows & in_cols
-
-    V_rows = V_rows[in_image]
-    V_cols = V_cols[in_image]
-    U_rows = U_rows[in_image]
-    U_cols = U_cols[in_image]
-
-    image[V_rows, V_cols] = rendered_rgb[U_rows, U_cols]
-    if is_depth:
-        image[V_rows, V_cols] += background_plane_img[V_rows, V_cols]
-    return image
-
-
-def makeFinalRender(
-        templates, observed, thetas, ts,
-        is_depth=False, background_plane_img=None, copy_observed=False):
-
-    if copy_observed:
-        final_render = observed.copy()
-    elif is_depth:
-        final_render = background_plane_img.copy()
-    else:
-        final_render = np.zeros_like(observed)
-
-    for i, template in enumerate(templates):
-        theta = thetas[i]
-        t = ts[i]
-        R = geometry.rotationMatrix(theta)
-        final_render = transformTemplate(
-            observed, template, R, t,
-            image=final_render, ignore_zero=True,
-            is_depth=is_depth,
-            background_plane_img=background_plane_img
-        )
-
-    return final_render
-
-
+# -=( HELPER FUNCTIONS FOR LEGACY RENDERER )==---------------------------------
 def findCentroid(img):
     if not img.any():
         raise ValueError
@@ -797,3 +817,69 @@ def zBufferConvexPolygon(
     # Write to the Z-buffer and label image
     range_image[rows, cols] = z_computed
     label_image[rows, cols] = face_label
+
+
+# -=( DEPRECATED FUNCTIONS )==-------------------------------------------------
+def transformTemplate(
+        observed_rgb, rendered_rgb, R, t, image=None, ignore_zero=False,
+        is_depth=False, background_plane_img=None):
+    if image is None:
+        image = np.zeros_like(observed_rgb)
+
+    row_bounds = (0, rendered_rgb.shape[0] - 1)
+    col_bounds = (0, rendered_rgb.shape[1] - 1)
+    U = geometry.sampleInteriorUniform(row_bounds, col_bounds)
+    U_rows, U_cols = utils.splitColumns(U)
+
+    if ignore_zero:
+        U_pixels = np.squeeze(rendered_rgb[U_rows, U_cols], axis=1)
+        if len(U_pixels.shape) > 1:
+            U_pixels = U_pixels.sum(axis=1)
+        px_is_zero = U_pixels == 0
+        U = U[~px_is_zero]
+        U_rows, U_cols = utils.splitColumns(U)
+
+    V = geometry.computeImage(U, R, t)
+    # V = projectIntoImage(V, observed_rgb.shape[0:2])
+    V_rows, V_cols = utils.splitColumns(V)
+
+    num_rows, num_cols = image.shape[0:2]
+
+    in_rows = V_rows < num_rows
+    in_cols = V_cols < num_cols
+    in_image = in_rows & in_cols
+
+    V_rows = V_rows[in_image]
+    V_cols = V_cols[in_image]
+    U_rows = U_rows[in_image]
+    U_cols = U_cols[in_image]
+
+    image[V_rows, V_cols] = rendered_rgb[U_rows, U_cols]
+    if is_depth:
+        image[V_rows, V_cols] += background_plane_img[V_rows, V_cols]
+    return image
+
+
+def makeFinalRender(
+        templates, observed, thetas, ts,
+        is_depth=False, background_plane_img=None, copy_observed=False):
+
+    if copy_observed:
+        final_render = observed.copy()
+    elif is_depth:
+        final_render = background_plane_img.copy()
+    else:
+        final_render = np.zeros_like(observed)
+
+    for i, template in enumerate(templates):
+        theta = thetas[i]
+        t = ts[i]
+        R = geometry.rotationMatrix(theta)
+        final_render = transformTemplate(
+            observed, template, R, t,
+            image=final_render, ignore_zero=True,
+            is_depth=is_depth,
+            background_plane_img=background_plane_img
+        )
+
+    return final_render
