@@ -10,8 +10,9 @@ from skimage.future import graph
 from sklearn import cluster
 import numpy as np
 
+from mathtools import utils
+# FIXME: Remove dependency on definitions
 from blocks.core import definitions as defn
-from seqtools import utils
 
 from . import render, geometry
 

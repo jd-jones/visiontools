@@ -8,8 +8,7 @@ import torch
 import numpy as np
 from scipy import spatial
 
-from blocks.core.mixins import LoggerMixin
-from blocks.core import utils
+from mathtools import utils
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,7 @@ def expand_dims(array, axis=None):
 
 
 # -=( PLANES AND SUBSPACES )==-------------------------------------------------
-class AffineSubspace(LoggerMixin):
+class AffineSubspace(object):
     """ k-dimensional affine subspace in R^d """
 
     def __init__(self, k, d):
