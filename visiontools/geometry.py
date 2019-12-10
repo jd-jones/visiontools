@@ -42,6 +42,33 @@ def expand_dims(array, axis=None):
         raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
 
 
+def pinv(array):
+    if isinstance(array, torch.Tensor):
+        return torch.pinverse(array)
+    elif isinstance(array, np.ndarray):
+        return np.pinv(array)
+    else:
+        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
+
+
+def diag(array):
+    if isinstance(array, torch.Tensor):
+        return torch.diag(array)
+    elif isinstance(array, np.ndarray):
+        return np.diag(array)
+    else:
+        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
+
+
+def transpose(array):
+    if isinstance(array, torch.Tensor):
+        return array.transpose(0, 1)
+    elif isinstance(array, np.ndarray):
+        return array.T
+    else:
+        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
+
+
 # -=( PLANES AND SUBSPACES )==-------------------------------------------------
 class AffineSubspace(object):
     """ k-dimensional affine subspace in R^d """
@@ -189,7 +216,7 @@ def standardBasis(dim, i, expand_axis=None):
     e_i[i] = 1
 
     if expand_axis is not None:
-        e_i = np.expand_dims(e_i, axis=expand_axis)
+        e_i = expand_dims(e_i, axis=expand_axis)
 
     return e_i
 
@@ -360,12 +387,12 @@ def invertHomogeneous(M, range_space_homogeneous=False, A_property=None):
     """
 
     if A_property is None:
-        invert = np.pinv
+        invert = pinv
     elif A_property == 'diag':
         def invert(x):
-            return np.diag(1 / np.diag(A))
+            return diag(1 / diag(A))
     elif A_property == 'ortho':
-        invert = np.transpose
+        invert = transpose
     else:
         err_str = f"Can't parse keyword argument 'A_property={A_property}'"
         raise ValueError(err_str)

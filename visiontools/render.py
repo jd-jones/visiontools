@@ -115,7 +115,7 @@ def loadCameraParams(
         return {
             'intrinsic_matrix': intrinsic_matrix,
             'camera_pose': camera_pose,
-            'object_colors': object_colors
+            'colors': object_colors
         }
 
     return intrinsic_matrix, camera_pose, object_colors
