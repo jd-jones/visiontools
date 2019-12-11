@@ -1,72 +1,15 @@
-from functools import partial
 import logging
 import functools
 import itertools
 import operator
 
-import torch
-import numpy as np
 from scipy import spatial
 
+import mathtools
 from mathtools import utils
 
 
 logger = logging.getLogger(__name__)
-
-
-# -=( PYTORCH/NUMPY COMPATIBILITY WRAPPERS )==---------------------------------
-def hstack(arrays):
-    if all(isinstance(array, torch.Tensor) for array in arrays):
-        return torch.cat(arrays, dim=1)
-    elif all(isinstance(array, np.ndarray) for array in arrays):
-        return np.hstack(arrays)
-    else:
-        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
-
-
-def vstack(arrays):
-    if all(isinstance(array, torch.Tensor) for array in arrays):
-        return torch.cat(arrays, dim=0)
-    elif all(isinstance(array, np.ndarray) for array in arrays):
-        return np.vstack(arrays)
-    else:
-        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
-
-
-def expand_dims(array, axis=None):
-    if isinstance(array, torch.Tensor):
-        return array.unsqueeze(axis)
-    elif isinstance(array, np.ndarray):
-        return np.expand_dims(array, axis=axis)
-    else:
-        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
-
-
-def pinv(array):
-    if isinstance(array, torch.Tensor):
-        return torch.pinverse(array)
-    elif isinstance(array, np.ndarray):
-        return np.pinv(array)
-    else:
-        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
-
-
-def diag(array):
-    if isinstance(array, torch.Tensor):
-        return torch.diag(array)
-    elif isinstance(array, np.ndarray):
-        return np.diag(array)
-    else:
-        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
-
-
-def transpose(array):
-    if isinstance(array, torch.Tensor):
-        return array.transpose(0, 1)
-    elif isinstance(array, np.ndarray):
-        return array.T
-    else:
-        raise AssertionError("Input arrays are not all of type torch.Tensor or np.ndarray")
 
 
 # -=( PLANES AND SUBSPACES )==-------------------------------------------------
@@ -109,7 +52,7 @@ class AffineSubspace(object):
         centered = data - data_mean
 
         # Fit subspace to centered data by projecting
-        u, s, v = np.linalg.svd(centered.T, full_matrices=False, compute_uv=True)
+        u, s, __ = mathtools.np.linalg.svd(centered.T, full_matrices=False, compute_uv=True)
 
         # If the data have at least rank k (ie the SVD has at least k singular
         # values), then we can fit a k-dimensional subspace. Otherwise the
@@ -143,7 +86,7 @@ class AffineSubspace(object):
         projected = self._project(data)
         error = data - projected
 
-        return np.linalg.norm(error, ord=2, axis=1)
+        return mathtools.np.linalg.norm(error, ord=2, axis=1)
 
     def _project(self, data):
         """ Orthogonally project data onto the affine subspace.
@@ -212,11 +155,11 @@ def standardBasis(dim, i, expand_axis=None):
         the i-th row or column of the identity matrix.
     """
 
-    e_i = np.zeros(dim)
+    e_i = mathtools.np.zeros(dim)
     e_i[i] = 1
 
     if expand_axis is not None:
-        e_i = expand_dims(e_i, axis=expand_axis)
+        e_i = mathtools.np.expand_dims(e_i, axis=expand_axis)
 
     return e_i
 
@@ -240,17 +183,19 @@ def projectHomogeneous(x):
     """
 
     if len(x.shape) < 2:
-        x = np.expand_dims(x, axis=0)
+        x = mathtools.np.expand_dims(x, axis=0)
 
     scale = x[:, -1]
 
-    if np.any(scale == 0):
-        warn_str = f"Tried to project {np.sum(scale == 0)} points with homogeneous coord == 0"
+    if mathtools.np.any(scale == 0):
+        warn_str = (
+            f"Tried to project {mathtools.np.sum(scale == 0)} points with homogeneous coord == 0"
+        )
         logger.warning(warn_str)
         return x[:-1], scale
 
     num_dims = x.shape[1] - 1
-    x_projected = x[:, :-1] / np.column_stack((scale,) * num_dims)
+    x_projected = x[:, :-1] / mathtools.np.column_stack((scale,) * num_dims)
 
     return x_projected.squeeze(), scale.squeeze()
 
@@ -270,10 +215,10 @@ def homogeneousVector(x):
     """
 
     if len(x.shape) < 2:
-        x = np.expand_dims(x, axis=0)
+        x = mathtools.np.expand_dims(x, axis=0)
 
-    ONES = np.ones((x.shape[0], 1))
-    x_homogeneous = np.hstack((x, ONES))
+    ONES = mathtools.np.ones((x.shape[0], 1))
+    x_homogeneous = mathtools.np.hstack((x, ONES))
 
     return x_homogeneous.squeeze()
 
@@ -308,12 +253,12 @@ def homogeneousMatrix(A, b, range_space_homogeneous=False):
         Affine transformation represented in homogeneous coordinates.
     """
 
-    b = expand_dims(b, axis=1)
-    M = hstack((A, b))
+    b = mathtools.np.expand_dims(b, axis=1)
+    M = mathtools.np.hstack((A, b))
 
     if range_space_homogeneous:
         homogeneous_row = standardBasis(M.shape[1], -1, expand_axis=0)
-        M = vstack((M, homogeneous_row))
+        M = mathtools.np.vstack((M, homogeneous_row))
 
     return M
 
@@ -378,7 +323,7 @@ def invertHomogeneous(M, range_space_homogeneous=False, A_property=None):
         so that its range space is also expressed in homogeneous coordinates.
     A_property : {'diag', 'ortho'}, optional
         Special property of the submatrix `A` that could make inversion easier.
-        If no argument is given, this function just calls `np.linalg.pinv`.
+        If no argument is given, this function just calls `mathtools.np.linalg.pinv`.
 
     Returns
     -------
@@ -387,12 +332,12 @@ def invertHomogeneous(M, range_space_homogeneous=False, A_property=None):
     """
 
     if A_property is None:
-        invert = pinv
+        invert = mathtools.np.pinv
     elif A_property == 'diag':
         def invert(x):
-            return diag(1 / diag(A))
+            return mathtools.np.diag(1 / mathtools.np.diag(A))
     elif A_property == 'ortho':
-        invert = transpose
+        invert = mathtools.np.transpose
     else:
         err_str = f"Can't parse keyword argument 'A_property={A_property}'"
         raise ValueError(err_str)
@@ -468,11 +413,11 @@ def solveLine(angle, offset, x=None, y=None):
     """
 
     if x is not None:
-        solution = (offset - x * np.cos(angle)) / np.sin(angle)
+        solution = (offset - x * mathtools.np.cos(angle)) / mathtools.np.sin(angle)
         return solution
 
     if y is not None:
-        solution = (offset - y * np.sin(angle)) / np.cos(angle)
+        solution = (offset - y * mathtools.np.sin(angle)) / mathtools.np.cos(angle)
         return solution
 
 
@@ -501,8 +446,8 @@ def rc2xy(Ur, Uc, image_dims):
 
     if len(image_dims) > 2:
         num_channels = image_dims[2]
-        Ux = np.repeat(Ux[:, :, np.newaxis], num_channels, axis=2)
-        Uy = np.repeat(Uy[:, :, np.newaxis], num_channels, axis=2)
+        Ux = mathtools.np.repeat(Ux[:, :, None], num_channels, axis=2)
+        Uy = mathtools.np.repeat(Uy[:, :, None], num_channels, axis=2)
 
     return Ux, Uy
 
@@ -510,11 +455,11 @@ def rc2xy(Ur, Uc, image_dims):
 def rDotField(X, Y):
     """ Make a vector field representing an infinitesimal rotation. """
 
-    THETA = np.arctan2(Y, X)
-    XY = np.dstack((X, Y))
+    THETA = mathtools.np.arctan2(Y, X)
+    XY = mathtools.np.dstack((X, Y))
 
-    U = np.zeros_like(X)
-    V = np.zeros_like(Y)
+    U = mathtools.np.zeros_like(X)
+    V = mathtools.np.zeros_like(Y)
 
     theta_rows, theta_cols = THETA.shape
     for i in range(theta_rows):
@@ -570,7 +515,7 @@ def backprojectIntoPlane(px_coords, n, b, camera_params):
     """
 
     if len(px_coords.shape) < 2:
-        px_coords = np.expand_dims(px_coords, axis=0)
+        px_coords = mathtools.np.expand_dims(px_coords, axis=0)
 
     # maps [x, y, 1] --> [X / Z, Y / Z, 1]
     backproject = invertHomogeneous(
@@ -603,8 +548,8 @@ def projectNullspace(x, A):
     """
 
     d, k = A.shape
-    Identity = np.eye(d)
-    A_d = np.vstack(A, Identity[:, k + 1:])
+    Identity = mathtools.np.eye(d)
+    A_d = mathtools.np.vstack(A, Identity[:, k + 1:])
 
     # Project x into the range space of A, then subtract off that component
     x_perp = x - x @ A_d.T
@@ -632,10 +577,10 @@ def slopeIntercept(points):
         The plane's offset.
     """
 
-    plane_vectors = np.diff(points, axis=0)
+    plane_vectors = mathtools.np.diff(points, axis=0)
 
-    n = np.cross(plane_vectors[0,:], plane_vectors[1,:])
-    c = - np.dot(n, points[0,:])
+    n = mathtools.np.cross(plane_vectors[0,:], plane_vectors[1,:])
+    c = - mathtools.np.dot(n, points[0,:])
 
     return n, c
 
@@ -684,24 +629,24 @@ def rotationMatrix(z_angle=None, y_angle=None, x_angle=None, in_degrees=True):
         x_angle = 0
 
     if in_degrees:
-        z_angle = np.radians(z_angle)
-        y_angle = np.radians(y_angle)
-        x_angle = np.radians(x_angle)
+        z_angle = mathtools.np.radians(z_angle)
+        y_angle = mathtools.np.radians(y_angle)
+        x_angle = mathtools.np.radians(x_angle)
 
     # Return a 2D array if we didn't get rotations about X or Y
     if z_only:
-        R = np.array(
-            [[np.cos(z_angle), -np.sin(z_angle)],
-             [np.sin(z_angle), np.cos(z_angle)]]
+        R = mathtools.np.array(
+            [[mathtools.np.cos(z_angle), -mathtools.np.sin(z_angle)],
+             [mathtools.np.sin(z_angle), mathtools.np.cos(z_angle)]]
         )
         return R
 
     # Build up the complete rotation one axis at a time
-    R = np.eye(3)
+    R = mathtools.np.eye(3)
     for i, angle in enumerate((x_angle, y_angle, z_angle), start=1):
-        indices = np.arange(i, i + 2) % 3
+        indices = mathtools.np.arange(i, i + 2) % 3
         rows, cols = zip(*itertools.product(indices, indices))
-        R_axis = np.eye(3)
+        R_axis = mathtools.np.eye(3)
         R_axis[rows, cols] = rotationMatrix(z_angle=angle, in_degrees=False).ravel()
         R = R @ R_axis
 
@@ -722,7 +667,7 @@ def reflectionMatrix(axis):
         Matrix that reflects points about `axis`.
     """
 
-    R = np.eye(3)
+    R = mathtools.np.eye(3)
     R[axis, axis] = -1
 
     return R
@@ -751,7 +696,7 @@ def skewSymmetricMatrix(omega):
 
     check3d(omega)
 
-    W = np.zeros((3, 3))
+    W = mathtools.np.zeros((3, 3))
     for i, w in enumerate(omega):
         row = (i + 1) % 3
         col = (i + 2) % 3
@@ -765,22 +710,22 @@ def skewSymmetricMatrix(omega):
 def exponentialMap(omega, small_angle=False, in_degrees=True):
     """ Compute the exponential map of an infinitesimal rotation. """
 
-    omega_norm = np.linalg.norm(omega)
+    omega_norm = mathtools.np.linalg.norm(omega)
     omega_unit = omega / omega_norm
 
     if in_degrees:
-        omega_norm = np.radians(omega_norm)
+        omega_norm = mathtools.np.radians(omega_norm)
 
     skew_sym = skewSymmetricMatrix(omega_unit)
 
     if small_angle:
-        exp_map = np.eye(3) + skew_sym
+        exp_map = mathtools.np.eye(3) + skew_sym
         return exp_map
 
     exp_map = (
-        np.eye(3)
-        + np.sin(omega_norm) * skew_sym
-        + (1 - np.cos(omega_norm)) * (skew_sym @ skew_sym)
+        mathtools.np.eye(3)
+        + mathtools.np.sin(omega_norm) * skew_sym
+        + (1 - mathtools.np.cos(omega_norm)) * (skew_sym @ skew_sym)
     )
 
     return exp_map
@@ -802,11 +747,11 @@ def estimateRotation(centered_points):
         the input.
     """
 
-    U, S, Vt = np.linalg.svd(centered_points)
+    U, S, Vt = mathtools.np.linalg.svd(centered_points)
     R = Vt.T
 
     # Handle reflections / project from O(d) into SO(d)
-    det_R = np.linalg.det(R)
+    det_R = mathtools.np.linalg.det(R)
     if det_R < 0:
         R[:,-1] *= det_R
 
@@ -840,8 +785,8 @@ def estimatePose(points, xy_only=False, estimate_orientation=True):
     if xy_only:
         points_xy = points[:,0:2]
         R_xy, t_xy = estimatePose(points_xy, estimate_orientation=estimate_orientation)
-        t = np.zeros(3)
-        R = np.eye(3)
+        t = mathtools.np.zeros(3)
+        R = mathtools.np.eye(3)
         t[0:2] = t_xy
         R[0:2, 0:2] = R_xy
         return R, t
@@ -851,7 +796,7 @@ def estimatePose(points, xy_only=False, estimate_orientation=True):
         R = estimateRotation(points - t)
     else:
         num_dims = points.shape[1]
-        R = np.eye(num_dims)
+        R = mathtools.np.eye(num_dims)
 
     return R, t
 
@@ -877,7 +822,7 @@ def getExtremePoints(convex_hull):
 
 
 def getVertices(state, centered):
-    f = partial(state.getComponentVertices, state)
+    f = functools.partial(state.getComponentVertices, state)
     gen = (f(i, centered=centered) for i in state.connected_components.keys())
     return tuple(gen)
 
@@ -890,9 +835,9 @@ def matchingPolygon(points, polygons, z_vertices):
         err_str = 'number of polygons ({}) should match number of z coords ({})'
         raise ValueError(err_str.format(num_poly, num_z))
 
-    poly_indices = np.array(list(polygons.keys()))
+    poly_indices = mathtools.np.array(list(polygons.keys()))
 
-    matching_poly_zvals = np.zeros((num_points, num_poly))
+    matching_poly_zvals = mathtools.np.zeros((num_points, num_poly))
     for i, poly_index in enumerate(polygons.keys()):
         poly = polygons[poly_index]
         vz = z_vertices[poly_index]
@@ -903,7 +848,7 @@ def matchingPolygon(points, polygons, z_vertices):
     matching_polys = poly_indices[matching_polys]
     matching_polys += 1
 
-    matches_background = np.logical_not(matching_poly_zvals.any(axis=1))
+    matches_background = mathtools.np.logical_not(matching_poly_zvals.any(axis=1))
     matching_polys[matches_background] = 0
 
     return matching_polys
@@ -930,10 +875,10 @@ def backProject(camera_params, pixel_coords, depths):
         err_str = 'pixel_coords is shape ({}, {}), but should be (num_pixels, 2)'
         raise ValueError(err_str.format(num_pixels, num_dims))
 
-    metric_coord = np.zeros((num_pixels, 3))
+    metric_coord = mathtools.np.zeros((num_pixels, 3))
     metric_coord[:,2] = depths
 
-    inv_focal = np.linalg.pinv(focal_params)
+    inv_focal = mathtools.np.linalg.pinv(focal_params)
     metric_coord[:,0:2] = depths * (pixel_coords - origin) @ inv_focal.T
 
     metric_coord[:,1] *= -1
@@ -943,7 +888,7 @@ def backProject(camera_params, pixel_coords, depths):
 
 # FIXME: same as homogeneousVector
 def toProjectiveCoords(coord):
-    return np.append(coord, 1)
+    return mathtools.np.append(coord, 1)
 
 
 def fromProjectiveCoords(coord):
@@ -980,9 +925,9 @@ def boundingBox(points, image_shape):
     y_min = max(y_pts.min(), 0)
     y_max = min(y_pts.max() + 1, image_shape[0])
 
-    x = np.arange(x_min, x_max)
-    y = np.arange(y_min, y_max)
-    bounding_box_coords = np.dstack(np.meshgrid(x, y)).reshape(-1, 2)
+    x = mathtools.np.arange(x_min, x_max)
+    y = mathtools.np.arange(y_min, y_max)
+    bounding_box_coords = mathtools.np.dstack(mathtools.np.meshgrid(x, y)).reshape(-1, 2)
     return bounding_box_coords
 
 
@@ -1022,8 +967,8 @@ def extremePoints(*intervals):
 
     min_coords, max_coords = zip(*intervals)
 
-    min_vtx = np.array(list(min_coords))
-    max_vtx = np.array(list(max_coords))
+    min_vtx = mathtools.np.array(list(min_coords))
+    max_vtx = mathtools.np.array(list(max_coords))
 
     return min_vtx, max_vtx
 
@@ -1103,7 +1048,7 @@ def sampleInteriorUniform(*intervals, sample_period=1):
     interval_samples = tuple(sampleIntervalUniform(i) for i in intervals)
     interior_samples = itertools.product(*interval_samples)
 
-    return np.array([list(tup) for tup in interior_samples])
+    return mathtools.np.array([list(tup) for tup in interior_samples])
 
 
 def sampleIntervalRandom(interval, integer_sample=True):
@@ -1111,9 +1056,9 @@ def sampleIntervalRandom(interval, integer_sample=True):
     lower, upper = interval
 
     if integer_sample:
-        lower_int = np.floor(lower)
-        upper_int = np.ceil(upper)
-        return np.random.randint(lower_int, upper_int)
+        lower_int = mathtools.np.floor(lower)
+        upper_int = mathtools.np.ceil(upper)
+        return mathtools.np.random.randint(lower_int, upper_int)
 
     err_str = 'Non-integer samples are not supported yet.'
     raise NotImplementedError(err_str)
@@ -1121,13 +1066,13 @@ def sampleIntervalRandom(interval, integer_sample=True):
 
 def sampleInteriorRandom(*intervals):
     samples = [sampleIntervalRandom(i) for i in intervals]
-    return np.array(samples)
+    return mathtools.np.array(samples)
 
 
 def rDot(theta):
-    dR_dtheta = np.array([
-        [-np.sin(theta), -np.cos(theta)],
-        [np.cos(theta), -np.sin(theta)]
+    dR_dtheta = mathtools.np.array([
+        [-mathtools.np.sin(theta), -mathtools.np.cos(theta)],
+        [mathtools.np.cos(theta), -mathtools.np.sin(theta)]
     ])
 
     return dR_dtheta
