@@ -6,6 +6,7 @@ import numpy as np
 from scipy.spatial.qhull import QhullError
 import torch
 
+import mathtools as m
 from mathtools import utils
 
 from . import geometry
@@ -96,17 +97,18 @@ def loadCameraParams(
     # Load camera params
     with open(os.path.join(assets_dir, camera_params_fn), 'rt') as f:
         json_obj = json.load(f)['camera_intrinsics']['intrinsic_matrix']
-        intrinsic_matrix = np.array(json_obj).transpose()
+        intrinsic_matrix = m.np.transpose(m.np.array(json_obj))
 
     # Load camera pose
     with open(os.path.join(assets_dir, camera_pose_fn), 'rt') as f:
         camera_pose_dict = json.load(f)['camera_pose']
+
     R_camera = geometry.rotationMatrix(**camera_pose_dict['orientation'])
-    t_camera = np.array(camera_pose_dict['position'])
+    t_camera = m.np.array(camera_pose_dict['position'])
     camera_pose = geometry.homogeneousMatrix(R_camera, t_camera, range_space_homogeneous=True)
 
     # Load object colors (ie rudimentary appearance model)
-    object_colors = np.loadtxt(
+    object_colors = m.np.loadtxt(
         os.path.join(assets_dir, object_colors_fn),
         delimiter=',', skiprows=1
     )
@@ -153,20 +155,27 @@ def reduceByDepth(rgb_images, depth_images):
     return rgb_image, depth_image, label_image
 
 
-def planeVertices(plane, intrinsic_matrix, camera_pose, img_shape=None):
-    if img_shape is None:
-        img_shape = (IMAGE_HEIGHT, IMAGE_WIDTH)
+def planeVertices(plane, intrinsic_matrix, camera_pose, image_shape=None):
+    if image_shape is None:
+        image_shape = (IMAGE_HEIGHT, IMAGE_WIDTH)
 
-    face_coords = np.array([
+    image_shape = tuple(float(x) for x in image_shape)
+
+    face_coords = m.np.array([
         [0, 0],
-        [0, img_shape[0]],
-        [img_shape[1], 0],
-        [img_shape[1], img_shape[0]]
+        [0, image_shape[0]],
+        [image_shape[1], 0],
+        [image_shape[1], image_shape[0]]
+    ])
+
+    plane_faces = m.np.array([
+        [0, 1, 2],
+        [3, 2, 1]
     ])
 
     # Consruct face_coords_camera in a way that allows
     # geometry.slopeIntercept to compute the plane parameters it needs.
-    face_coords_camera = np.zeros((3, 3))
+    face_coords_camera = m.np.zeros((3, 3))
     face_coords_camera[0, :] = plane._t
     face_coords_camera[1, :] = plane._t + plane._U[:, 0]
     face_coords_camera[2, :] = plane._t + plane._U[:, 0] + plane._U[:, 1]
@@ -174,25 +183,33 @@ def planeVertices(plane, intrinsic_matrix, camera_pose, img_shape=None):
     # Backproject each pixel in the face to its location in camera coordinates
     n, b = geometry.slopeIntercept(face_coords_camera)
     metric_coords_camera = geometry.backprojectIntoPlane(face_coords, n, b, intrinsic_matrix)
-    vertices = metric_coords_camera.T @ camera_pose.T
+    vertices = geometry.homogeneousVector(metric_coords_camera) @ m.np.transpose(camera_pose)
 
-    return vertices
+    return vertices, plane_faces
 
 
 def makeTextures(faces, texture_size=2, uniform_color=None):
     """
+
+    Parameters
+    ----------
+    faces : array of int, shape (num_faces, 3)
+    texture_size : int, optional
+    uniform_color : [int, int, int], optional
+
+    Returns
+    -------
+    textures : array of float, shape (num_faces, texture_size, texture_size, texture_size, 3)
     """
 
-    # create texture [batch_size=1, num_faces, texture_size, texture_size, texture_size, RGB]
-    textures = torch.zeros(
-        1, faces.shape[1], texture_size, texture_size, texture_size, 3,
+    # create texture [num_faces, texture_size, texture_size, texture_size, RGB]
+    textures = m.np.zeros(
+        faces.shape[0], texture_size, texture_size, texture_size, 3,
         dtype=torch.float32
     )
 
     if uniform_color is not None:
         textures[..., :] = torch.tensor(uniform_color)
-
-    textures = textures.cuda()  # to gpu
 
     return textures
 
@@ -597,10 +614,10 @@ def zBufferConvexPolygon(
         # Project face vertices from world coordinates to pixel coordinates
         proj = geometry.homogeneousMatrix(np.eye(3), np.zeros(3))
         face_coords_camera, _ = geometry.projectHomogeneous(
-            geometry.homogeneousVector(face_coords_world) @ camera_pose.T
+            geometry.homogeneousVector(face_coords_world) @ m.np.transpose(camera_pose)
         )
         face_coords_image, _ = geometry.projectHomogeneous(
-            geometry.homogeneousVector(face_coords_camera) @ (camera_params @ proj).T
+            geometry.homogeneousVector(face_coords_camera) @ m.np.transpose(camera_params @ proj)
         )
         face_coords_image = utils.roundToInt(face_coords_image)
     elif face_coords_world is None:
