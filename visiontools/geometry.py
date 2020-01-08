@@ -48,7 +48,7 @@ class AffineSubspace(object):
         """
 
         # Fit translation of an affine subspace
-        data_mean = data.mean(axis=0)
+        data_mean = data.mean(0)
         centered = data - data_mean
 
         # Fit subspace to centered data by projecting
@@ -268,7 +268,7 @@ def fromHomogeneous(M):
 
     Parameters
     ----------
-    M : numpy array of float, shape (num_dims, num_dims + 1) or (num_dims + 1, num_dims + 1)
+    M : numpy array of float, shape (*, num_dims, num_dims + 1) or (*, num_dims + 1, num_dims + 1)
         Matrix representing an affine transformation in homogeneous coordinates.
         if ``M.shape == (num_dims + 1, num_dims + 1)``, its last row is :math:`[0 1]`
         so that its output is also in homogeneous coordinates.
@@ -279,7 +279,7 @@ def fromHomogeneous(M):
     b : numpy array of float, shape (num_dims,)
     """
 
-    num_rows, num_cols = M.shape
+    num_rows, num_cols = M.shape[-2:]
 
     if num_rows == num_cols:
         row_bound = -1
@@ -289,8 +289,8 @@ def fromHomogeneous(M):
         err_str = f"Input shape {M.shape} does not correspond to a homogeneous matrix"
         raise ValueError(err_str)
 
-    A = M[:row_bound, :-1]
-    b = M[:row_bound, -1]
+    A = M[..., :row_bound, :-1]
+    b = M[..., :row_bound, -1]
 
     return A, b
 
@@ -651,6 +651,25 @@ def rotationMatrix(z_angle=None, y_angle=None, x_angle=None, in_degrees=True):
     return R
 
 
+def zRotations(angles, in_degrees=False):
+    if in_degrees:
+        angles = m.np.radians(angles)
+
+    cos = m.np.cos(angles)
+    sin = m.np.sin(angles)
+
+    ZERO = m.np.zeros_like(cos)
+    ONE = m.np.ones_like(cos)
+
+    R_z = m.np.dstack((
+        m.np.hstack((cos, -sin, ZERO)),
+        m.np.hstack((sin, cos, ZERO)),
+        m.np.hstack((ZERO, ZERO, ONE))
+    ))
+
+    return R_z
+
+
 def reflectionMatrix(axis):
     """ Construct a matrix that reflects about the specified axis.
 
@@ -789,7 +808,7 @@ def estimatePose(points, xy_only=False, estimate_orientation=True):
         R[0:2, 0:2] = R_xy
         return R, t
 
-    t = points.mean(axis=0)
+    t = points.mean(0)
     if estimate_orientation:
         R = estimateRotation(points - t)
     else:

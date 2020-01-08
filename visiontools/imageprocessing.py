@@ -8,8 +8,8 @@ from skimage import color, feature, measure, morphology, segmentation
 from skimage import transform, draw, filters, img_as_float
 from skimage.future import graph
 from sklearn import cluster
-import numpy as np
 
+import mathtools as m
 from mathtools import utils
 # FIXME: Remove dependency on definitions
 from blocks.core import definitions as defn
@@ -58,7 +58,7 @@ def imageFromForegroundPixels(
     """
 
     if not foreground_pixels.any():
-        return np.zeros(foreground_labels.shape, dtype=foreground_pixels.dtype)
+        return m.np.zeros(foreground_labels.shape, dtype=foreground_pixels.dtype)
 
     if background_class_index is None:
         is_foreground = foreground_labels
@@ -70,7 +70,7 @@ def imageFromForegroundPixels(
         num_channels = foreground_pixels.shape[1]
         image_dims += (num_channels,)
 
-    image = np.zeros(image_dims, dtype=foreground_pixels.dtype)
+    image = m.np.zeros(image_dims, dtype=foreground_pixels.dtype)
     image[is_foreground] = foreground_pixels
 
     if image_transform is not None:
@@ -186,20 +186,20 @@ def displayImage(image):
 
 def getPixelCoords(label_image, label_index):
     matches_label = label_image == label_index
-    rows_and_cols = matches_label.nonzero()
-    return np.column_stack(rows_and_cols)
+    rows_and_cols = m.np.nonzero(matches_label)
+    return m.np.column_stack(rows_and_cols)
 
 
 def imgGradient(img, sigma=None):
     """ Return image gradients in the row and column directions. """
 
     # gradient in X direction (cols)
-    aug_img = np.hstack((img[:,0:1], img))
-    grad_c = np.diff(aug_img, axis=1)
+    aug_img = m.np.hstack((img[:,0:1], img))
+    grad_c = m.np.diff(aug_img, 1)
 
     # gradient in Y direction (rows)
-    aug_img = np.vstack((img[0:1,:], img))
-    grad_r = np.diff(aug_img, axis=0)
+    aug_img = m.np.vstack((img[0:1,:], img))
+    grad_r = m.np.diff(aug_img, 0)
 
     if sigma is not None:
         grad_c = filters.gaussian(grad_c, sigma=sigma, multichannel=True)
@@ -213,7 +213,7 @@ def sse(observed, predicted, is_img=False):
     Compute the sum of squared errors (SSE) measure for predicting `predicted`
     when we really see `observed`.
 
-    FIXME: Because it calls np.linalg.norm, this function actually computes the
+    FIXME: Because it calls m.np.linalg.norm, this function actually computes the
         square root of the SSE metric.
 
     Parameters
@@ -254,9 +254,9 @@ def sse(observed, predicted, is_img=False):
     if len(residual.shape) > 2:
         sse = 0
         for i in range(residual.shape[2]):
-            sse += np.linalg.norm(residual[:,:,i], ord='fro')
+            sse += m.np.linalg.norm(residual[:,:,i], ord='fro')
     else:
-        sse = np.linalg.norm(residual)
+        sse = m.np.linalg.norm(residual)
 
     return sse
 
@@ -331,7 +331,7 @@ def overlap(observed, predicted, tol=0.001):
         err_str = 'Observed shape ({}) differs from predicted shape ({})!'
         raise ValueError(err_str.format(obsv_shape, tmpl_shape))
 
-    innovation = (observed - predicted).sum(axis=2)
+    innovation = (observed - predicted).sum(2)
     return (innovation > tol).sum()
 
 
@@ -360,10 +360,12 @@ def estimateSegmentPose(
         Vector reptresenting the segment's estimated 3D position (in mm)
     """
 
-    pixel_coords = np.column_stack(segment_mask.nonzero())
+    pixel_coords = m.np.column_stack(m.np.nonzero(segment_mask))
     depth = depth_image[pixel_coords[:,0], pixel_coords[:,1]]
 
-    world_coords = backprojectPixels(camera_params, camera_pose, pixel_coords[:,::-1], depth)
+    world_coords = backprojectPixels(
+        camera_params, camera_pose, m.np.flip(pixel_coords, axis=1), depth
+    )
 
     R, t = geometry.estimatePose(
         world_coords, xy_only=True, estimate_orientation=estimate_orientation
@@ -411,15 +413,15 @@ def backprojectPixels(camera_params, camera_pose, pixel_coords, depths, in_camer
         camera_params, A_property='diag', range_space_homogeneous=True
     )
 
-    camera_coords_scaled = geometry.homogeneousVector(pixel_coords) @ backproject.T
-    camera_coords = camera_coords_scaled * np.column_stack((depths, depths, depths))
+    camera_coords_scaled = geometry.homogeneousVector(pixel_coords) @ m.np.transpose(backproject)
+    camera_coords = camera_coords_scaled * m.np.column_stack((depths, depths, depths))
 
     if in_camera_coords:
         return camera_coords
 
     # Convert pixel coordinates to the world frame
     inv_camera_pose = geometry.invertHomogeneous(camera_pose, A_property='ortho')
-    world_coords = geometry.homogeneousVector(camera_coords) @ inv_camera_pose.T
+    world_coords = geometry.homogeneousVector(camera_coords) @ m.np.transpose(inv_camera_pose)
 
     if len(world_coords.shape) > 1:
         world_coords = world_coords[:, 0:3].squeeze()
@@ -432,7 +434,9 @@ def backprojectPixels(camera_params, camera_pose, pixel_coords, depths, in_camer
 def backprojectSegment(camera_params, depth_image, label_image, label_index):
     pixel_coords = getPixelCoords(label_image, label_index)
     z_coords = depth_image[pixel_coords[:,0], pixel_coords[:,1]]
-    metric_coords = backprojectPixels(camera_params, pixel_coords[:,::-1], z_coords)
+    metric_coords = backprojectPixels(
+        camera_params, m.np.flip(pixel_coords, axis=1), z_coords
+    )
     return metric_coords
 
 
@@ -475,8 +479,8 @@ def saturateImage(rgb_image, background_mask=None):
 
     # Saturate in HSV space
     hue = hsv_image[:, :, 0]
-    ONE = np.ones_like(hue)
-    hsv_saturated = np.dstack((hue, ONE, ONE))
+    ONE = m.np.ones_like(hue)
+    hsv_saturated = m.np.dstack((hue, ONE, ONE))
 
     # Convert back to RGB space
     with warnings.catch_warnings():
@@ -492,9 +496,9 @@ def saturateImage(rgb_image, background_mask=None):
 # DEPRECATED---use saturateImage instead
 def hueImgAsRgb(hsv_image):
     hue = hsv_image[:,:,0]
-    ONE = np.ones_like(hue)
+    ONE = m.np.ones_like(hue)
 
-    new_hsv = np.zeros_like(hsv_image)
+    new_hsv = m.np.zeros_like(hsv_image)
     new_hsv[:,:,0] = hue
     new_hsv[:,:,1] = ONE
     new_hsv[:,:,2] = ONE
@@ -530,10 +534,10 @@ def fitPlane(
         camera_pose = render.camera_pose
 
     # Backproject the depth image to world coordinates
-    pixel_coords = np.column_stack(np.nonzero(is_inlier))
+    pixel_coords = m.np.column_stack(m.np.nonzero(is_inlier))
     depth_coords = depth_image[pixel_coords[:,0], pixel_coords[:,1]]
     camera_coords = backprojectPixels(
-        camera_params, camera_pose, pixel_coords[:,::-1], depth_coords,
+        camera_params, camera_pose, m.np.flip(pixel_coords, axis=1), depth_coords,
         in_camera_coords=True
     )
 
@@ -660,7 +664,7 @@ def maskLowerLeftBorder(
     x_max = x_max_thresh * num_cols
     y_min = y_min_thresh * num_rows
 
-    hough_mask = np.zeros_like(edge_image, dtype=bool)
+    hough_mask = m.np.zeros_like(edge_image, dtype=bool)
 
     # Detect lines using the Hough transform
     h, theta, d = transform.hough_line(edge_image)
@@ -742,7 +746,7 @@ def makeObjectLabels(
         hue_coeff * shift(hue_image))
 
     any_thresh = rgb_thresh >= 0 or sat_thresh >= 0 or depth_thresh >= 0
-    if np.any(superpixels) and any_thresh:
+    if m.np.any(superpixels) and any_thresh:
         rgb_masked = rgb_image.copy()
         rgb_masked[label_mask == 0] = 0
         sat_masked = sat_image.copy()
@@ -762,9 +766,9 @@ def majorityVote(labels, min_snr=None, min_signal_count=None):
         err_str = 'Only one of min_snr and min_signal_count can be passed!'
         raise ValueError(err_str)
 
-    # background_count = np.sum(labels == 0)
-    noise_count = np.sum(labels == 1) + np.sum(labels == 2)
-    signal_count = np.sum(labels == 3)
+    # background_count = m.np.sum(labels == 0)
+    noise_count = m.np.sum(labels == 1) + m.np.sum(labels == 2)
+    signal_count = m.np.sum(labels == 3)
 
     if not signal_count and not noise_count:
         return 0
@@ -814,8 +818,8 @@ def maskDepth(is_nuisance, min_snr=None):
 
 
 def maskNuisance(labels, min_snr=None):
-    num_signal = np.sum(labels == 3)
-    num_noise = np.sum(labels == 2) + np.sum(labels == 1)
+    num_signal = m.np.sum(labels == 3)
+    num_noise = m.np.sum(labels == 2) + m.np.sum(labels == 1)
 
     if not num_noise:
         return False
@@ -840,7 +844,7 @@ def maskLargeSegments(labels, max_num_pixels=3000):
 
 
 def filterObjects(label_img, img, filter_func, num_labels):
-    new_img = np.zeros_like(img)
+    new_img = m.np.zeros_like(img)
     for i in range(1, num_labels + 1):
         filterObject(label_img, img, filter_func, new_img, i)
 
@@ -882,7 +886,7 @@ def segmentObjects(label_mask, num_seg_pixels=200, *images):
         err_str = 'At least one image must be supplied!'
         raise ValueError(err_str)
 
-    segmented_labels = np.zeros_like(label_mask)
+    segmented_labels = m.np.zeros_like(label_mask)
     num_objects = label_mask.max() + 1
     offset = 1
 
@@ -892,12 +896,12 @@ def segmentObjects(label_mask, num_seg_pixels=200, *images):
         num_segments = int(object_mask.sum() / num_seg_pixels)
         num_segments = max(num_segments, 1)
 
-        pixel_indices = np.argwhere(object_mask)
+        pixel_indices = m.np.argwhere(object_mask)
         points = [pixel_indices]
         for image in images:
             img_points = image[object_mask].reshape(-1, 1)
             points.append(img_points)
-        points = np.hstack(tuple(points))
+        points = m.np.hstack(tuple(points))
 
         segments = segmentObject(points, num_segments)
 
@@ -921,8 +925,8 @@ def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
     hue_image = shiftHue(hue_image)
 
     num_superpixels = superpixel_image.max() + 1
-    hue_labels = np.zeros_like(superpixel_image)
-    quantized_hue = np.zeros_like(hue_image)
+    hue_labels = m.np.zeros_like(superpixel_image)
+    quantized_hue = m.np.zeros_like(hue_image)
 
     for superpixel_index in range(1, num_superpixels):
         superpixel_mask = superpixel_image == superpixel_index
@@ -931,10 +935,10 @@ def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
         sat_patch = sat_image[superpixel_mask]
         val_patch = val_image[superpixel_mask]
 
-        if np.median(sat_patch) < sat_thresh:
+        if m.np.median(sat_patch) < sat_thresh:
             continue
 
-        if np.median(val_patch) < val_thresh:
+        if m.np.median(val_patch) < val_thresh:
             continue
 
         closest_hue_name = closestHue(hue_patch, defn.hue_name_dict)
@@ -951,10 +955,10 @@ def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
 
 
 def closestHue(hue_patch, hue_dict):
-    med_hue = np.median(hue_patch)
+    med_hue = m.np.median(hue_patch)
 
     best_hue_name = None
-    best_hue_dist = np.inf
+    best_hue_dist = m.np.inf
     for hue_name, hue in hue_dict.items():
         hue_dist = abs(med_hue - hue)
         if hue_dist < best_hue_dist:
@@ -974,7 +978,7 @@ def makeSuperpixelImage(
         quantized_hue = shiftHue(quantized_hue)
 
     num_superpixels = superpixels.max() + 1
-    superpixel_image = np.zeros_like(hsv_image)
+    superpixel_image = m.np.zeros_like(hsv_image)
 
     for superpixel_index in range(1, num_superpixels):
         superpixel_mask = superpixels == superpixel_index
@@ -984,13 +988,13 @@ def makeSuperpixelImage(
         # val_patch = val[superpixel_mask]
 
         if quantized_hue is None:
-            # superpixel_image[:,:,0][superpixel_mask] = np.median(hue_patch)
+            # superpixel_image[:,:,0][superpixel_mask] = m.np.median(hue_patch)
             superpixel_image[:,:,0][superpixel_mask] = hue_patch
         else:
             superpixel_image[:,:,0][superpixel_mask] = quantized_hue[superpixel_mask]
-        # superpixel_image[:,:,1][superpixel_mask] = np.median(sat_patch)
+        # superpixel_image[:,:,1][superpixel_mask] = m.np.median(sat_patch)
         superpixel_image[:,:,1][superpixel_mask] = 1
-        # superpixel_image[:,:,2][superpixel_mask] = np.median(val_patch)
+        # superpixel_image[:,:,2][superpixel_mask] = m.np.median(val_patch)
         superpixel_image[:,:,2][superpixel_mask] = 1
 
     superpixel_image[:,:,0] = invShiftHue(superpixel_image[:,:,0])
@@ -1063,8 +1067,8 @@ def imageIntervals(image_shape):
 
 def imageMidpoint(image_shape, integer_divide=False):
     if integer_divide:
-        return np.array([dim_size // 2 for dim_size in image_shape])
-    return np.array([dim_size / 2 for dim_size in image_shape])
+        return m.np.array([dim_size // 2 for dim_size in image_shape])
+    return m.np.array([dim_size / 2 for dim_size in image_shape])
 
 
 def projectIntoImage(pixel_coords, image_shape):
@@ -1085,21 +1089,21 @@ def templateGradient(T, V, U, theta, viz=False):
 
     if viz:
         logger.info('U: {} {}'.format(U.any(), U))
-        tr_img = np.abs(Tr)
-        displayImages(tr_img, np.abs(Tc))
+        tr_img = m.np.abs(Tr)
+        displayImages(tr_img, m.np.abs(Tc))
         tr_img[Ur, Uc] = [1, 0, 1]
         displayImages(tr_img)
 
     if len(T.shape) > 2:
-        Tr = Tr.sum(axis=2)
-        Tc = Tc.sum(axis=2)
+        Tr = Tr.sum(2)
+        Tc = Tc.sum(2)
 
     dT_dtr = Tr[Ur, Uc]
     dT_dtc = Tc[Ur, Uc]
-    dT_dt = np.column_stack((dT_dtr, dT_dtc))
+    dT_dt = m.np.column_stack((dT_dtr, dT_dtc))
 
     dR_dtheta = geometry.rDot(theta)
-    dT_dtheta = np.sum(dT_dt * (V @ dR_dtheta.T), axis=1)
+    dT_dtheta = m.np.sum(dT_dt * (V @ m.np.transpose(dR_dtheta)), 1)
 
     return dT_dtr, dT_dtc, dT_dtheta
 
@@ -1135,12 +1139,12 @@ def matchingPixels(reference_image, match_value=None):
 
     # Reduce an RGB image along its channel dimension
     if len(reference_image.shape) > 2:
-        reference_image = reference_image.sum(axis=2)
+        reference_image = reference_image.sum(2)
 
     if match_value is not None:
         reference_image = reference_image == match_value
 
-    nonzero_rows, nonzero_cols = np.nonzero(reference_image)
+    nonzero_rows, nonzero_cols = m.np.nonzero(reference_image)
     return nonzero_rows, nonzero_cols
 
 
@@ -1177,7 +1181,7 @@ def segmentBoundingBoxes(rgb_img, label_img=None):
 
 
 def labelsFromRgb(rgb_img):
-    channel_sum = rgb_img.sum(axis=2)
+    channel_sum = rgb_img.sum(2)
     label_img, num_labels = morphology.label(channel_sum != 0, return_num=True)
 
     return label_img, num_labels
@@ -1229,11 +1233,11 @@ def quantizeImage(model, rgb_image, foreground_label_image):
     quantized_hsv = model.cluster_centers_[cluster_labels]
 
     # Make an image displaying the segmentation
-    cluster_label_image = np.zeros(foreground_label_image.shape, dtype=int)
+    cluster_label_image = m.np.zeros(foreground_label_image.shape, dtype=int)
     cluster_label_image[in_foreground] = cluster_labels + 1
 
     # Make a quantized image
-    quantized_hsv_image = np.zeros_like(hsv_image)
+    quantized_hsv_image = m.np.zeros_like(hsv_image)
     quantized_hsv_image[in_foreground] = quantized_hsv
 
     # Convert from HSV to RGB
