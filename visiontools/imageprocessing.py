@@ -20,6 +20,7 @@ from . import render, geometry
 logger = logging.getLogger(__name__)
 
 
+# -=( PIXEL ACCESS )==---------------------------------------------------------
 def imageFromForegroundPixels(
         foreground_pixels, foreground_labels, image_transform=None, background_class_index=None):
     """ Construct an image from its foreground pixels.
@@ -132,6 +133,36 @@ def foregroundPixels(image, foreground_labels, image_transform=None, background_
     return foreground_pixels
 
 
+def matchingPixels(reference_image, match_value=None):
+    """ Find the coordinates of pixels matching a particular value.
+
+    Parameters
+    ----------
+    reference_image : numpy array, shape (img_height, img_width, num_channels)
+        This image will be matched against `match_value`.
+    match_value : int, optional
+        If a value is passed for this argument, the function returns the
+        coordinates of pixels matching this value in the input. If not, the
+        function returns the coordinates of all nonzero pixels in the input.
+
+    Returns
+    -------
+    nonzero_rows :
+    nonzero_cols :
+    """
+
+    # Reduce an RGB image along its channel dimension
+    if len(reference_image.shape) > 2:
+        reference_image = reference_image.sum(2)
+
+    if match_value is not None:
+        reference_image = reference_image == match_value
+
+    nonzero_rows, nonzero_cols = m.np.nonzero(reference_image)
+    return nonzero_rows, nonzero_cols
+
+
+# -=( VISUALIZATION )==--------------------------------------------------------
 def displayImages(*images, num_rows=1, figsize=None, file_path=None):
     """ Display images in a horizontally-oriented array  using matplotlib.
 
@@ -190,6 +221,146 @@ def getPixelCoords(label_image, label_index):
     return m.np.column_stack(rows_and_cols)
 
 
+# -=( COLOR SPACE PROCESSING )==-----------------------------------------------
+def shiftHue(hue_img):
+    hue_rows, hue_cols = hue_img.shape
+    should_shift = hue_img > 0.5
+    shifted_hue = hue_img.ravel() - 1
+
+    shifted_hue[~should_shift.ravel()] = hue_img.ravel()[~should_shift.ravel()]
+    shifted_hue = shifted_hue.reshape(hue_rows, hue_cols)
+    return shifted_hue
+
+
+def invShiftHue(hue_img):
+    hue_rows, hue_cols = hue_img.shape
+    should_shift = hue_img < 0
+    shifted_hue = hue_img.ravel() + 1
+
+    shifted_hue[~should_shift.ravel()] = hue_img.ravel()[~should_shift.ravel()]
+    shifted_hue = shifted_hue.reshape(hue_rows, hue_cols)
+    return shifted_hue
+
+
+def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
+    hue_image = hsv_image[:,:,0].copy()
+    sat_image = hsv_image[:,:,1].copy()
+    val_image = hsv_image[:,:,2].copy()
+
+    hue_image = shiftHue(hue_image)
+
+    num_superpixels = superpixel_image.max() + 1
+    hue_labels = m.np.zeros_like(superpixel_image)
+    quantized_hue = m.np.zeros_like(hue_image)
+
+    for superpixel_index in range(1, num_superpixels):
+        superpixel_mask = superpixel_image == superpixel_index
+
+        hue_patch = hue_image[superpixel_mask]
+        sat_patch = sat_image[superpixel_mask]
+        val_patch = val_image[superpixel_mask]
+
+        if m.np.median(sat_patch) < sat_thresh:
+            continue
+
+        if m.np.median(val_patch) < val_thresh:
+            continue
+
+        closest_hue_name = closestHue(hue_patch, defn.hue_name_dict)
+        if closest_hue_name in defn.nuisance_hue_names:
+            continue
+
+        closest_hue_label = defn.hue_label_dict[closest_hue_name] + 1
+        closest_hue = defn.hue_name_dict[closest_hue_name]
+        hue_labels[superpixel_mask] = closest_hue_label
+        quantized_hue[superpixel_mask] = closest_hue
+
+    quantized_hue = invShiftHue(quantized_hue)
+    return quantized_hue, hue_labels
+
+
+def closestHue(hue_patch, hue_dict):
+    med_hue = m.np.median(hue_patch)
+
+    best_hue_name = None
+    best_hue_dist = m.np.inf
+    for hue_name, hue in hue_dict.items():
+        hue_dist = abs(med_hue - hue)
+        if hue_dist < best_hue_dist:
+            best_hue_name = hue_name
+            best_hue_dist = hue_dist
+
+    return best_hue_name
+
+
+def quantizeImage(model, rgb_image, foreground_label_image):
+    # Convert image to HSV space because cluster centers are in HSV space
+    hsv_image = color.rgb2hsv(rgb_image)
+
+    # Make a background mask
+    in_foreground = foreground_label_image != 0
+    foreground_pixels = hsv_image[in_foreground, :]
+
+    # Assign each foreground pixel to the nearest cluster center
+    cluster_labels = model.predict(foreground_pixels)
+    quantized_hsv = model.cluster_centers_[cluster_labels]
+
+    # Make an image displaying the segmentation
+    cluster_label_image = m.np.zeros(foreground_label_image.shape, dtype=int)
+    cluster_label_image[in_foreground] = cluster_labels + 1
+
+    # Make a quantized image
+    quantized_hsv_image = m.np.zeros_like(hsv_image)
+    quantized_hsv_image[in_foreground] = quantized_hsv
+
+    # Convert from HSV to RGB
+    quantized_rgb_image = color.hsv2rgb(quantized_hsv_image)
+
+    return quantized_rgb_image, cluster_label_image
+
+
+def saturateImage(rgb_image, background_mask=None):
+    """ Convert to HSV, set saturation and value to max, and convert back to RGB.
+
+    If the input image is in integer format (values in [0, 255]), it is first
+    converted to float format (values in [0, 1]).
+
+    Parameters
+    ----------
+    rgb_image : numpy array of float or int, shape (img_height, img_width, num_channels)
+    background_mask : numpy array of bool, shape (img_height, img_width)
+        If provided, this function only saturates the foreground of the image.
+
+    Returns
+    -------
+    rgb_saturated : numpy array of float, shape (img_height, img_width, num_channels)
+        Saturated copy of the input, in float format.
+    """
+
+    rgb_image = img_as_float(rgb_image)
+
+    # Convert to HSV space
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "divide by zero")
+        hsv_image = color.rgb2hsv(rgb_image)
+
+    # Saturate in HSV space
+    hue = hsv_image[:, :, 0]
+    ONE = m.np.ones_like(hue)
+    hsv_saturated = m.np.dstack((hue, ONE, ONE))
+
+    # Convert back to RGB space
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "divide by zero")
+        rgb_saturated = color.hsv2rgb(hsv_saturated)
+
+    if background_mask is not None:
+        rgb_saturated[background_mask] = rgb_image[background_mask]
+
+    return rgb_saturated
+
+
+# -=( GRADIENT )==-------------------------------------------------------------
 def imgGradient(img, sigma=None):
     """ Return image gradients in the row and column directions. """
 
@@ -208,6 +379,33 @@ def imgGradient(img, sigma=None):
     return grad_r, grad_c
 
 
+def templateGradient(T, V, U, theta, viz=False):
+    Ur, Uc = utils.splitColumns(U)
+
+    Tr, Tc = imgGradient(T)
+
+    if viz:
+        logger.info('U: {} {}'.format(U.any(), U))
+        tr_img = m.np.abs(Tr)
+        displayImages(tr_img, m.np.abs(Tc))
+        tr_img[Ur, Uc] = [1, 0, 1]
+        displayImages(tr_img)
+
+    if len(T.shape) > 2:
+        Tr = Tr.sum(2)
+        Tc = Tc.sum(2)
+
+    dT_dtr = Tr[Ur, Uc]
+    dT_dtc = Tc[Ur, Uc]
+    dT_dt = m.np.column_stack((dT_dtr, dT_dtc))
+
+    dR_dtheta = geometry.rDot(theta)
+    dT_dtheta = m.np.sum(dT_dt * (V @ m.np.transpose(dR_dtheta)), 1)
+
+    return dT_dtr, dT_dtc, dT_dtheta
+
+
+# -=( LOSS FUNCTIONS )==-------------------------------------------------------
 def sse(observed, predicted, is_img=False):
     """
     Compute the sum of squared errors (SSE) measure for predicting `predicted`
@@ -335,6 +533,7 @@ def overlap(observed, predicted, tol=0.001):
     return (innovation > tol).sum()
 
 
+# -=( 3D GEOMETRY )==-----------------------------------------------------
 def estimateSegmentPose(
         camera_params, camera_pose, depth_image, segment_mask,
         estimate_orientation=True):
@@ -440,72 +639,6 @@ def backprojectSegment(camera_params, depth_image, label_image, label_index):
     return metric_coords
 
 
-def getImageSegments(rgb_image, label_image):
-    num_labels = label_image.max() + 1
-    f = functools.partial(getImageSegment, rgb_image, label_image)
-    return tuple(f(i) for i in range(1, num_labels))
-
-
-def getImageSegment(image, label_image, label_index):
-    pixel_coords = getPixelCoords(label_image, label_index)
-    pix_vals = image[pixel_coords[:,0], pixel_coords[:,1]]
-    return pix_vals
-
-
-def saturateImage(rgb_image, background_mask=None):
-    """ Convert to HSV, set saturation and value to max, and convert back to RGB.
-
-    If the input image is in integer format (values in [0, 255]), it is first
-    converted to float format (values in [0, 1]).
-
-    Parameters
-    ----------
-    rgb_image : numpy array of float or int, shape (img_height, img_width, num_channels)
-    background_mask : numpy array of bool, shape (img_height, img_width)
-        If provided, this function only saturates the foreground of the image.
-
-    Returns
-    -------
-    rgb_saturated : numpy array of float, shape (img_height, img_width, num_channels)
-        Saturated copy of the input, in float format.
-    """
-
-    rgb_image = img_as_float(rgb_image)
-
-    # Convert to HSV space
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "divide by zero")
-        hsv_image = color.rgb2hsv(rgb_image)
-
-    # Saturate in HSV space
-    hue = hsv_image[:, :, 0]
-    ONE = m.np.ones_like(hue)
-    hsv_saturated = m.np.dstack((hue, ONE, ONE))
-
-    # Convert back to RGB space
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", "divide by zero")
-        rgb_saturated = color.hsv2rgb(hsv_saturated)
-
-    if background_mask is not None:
-        rgb_saturated[background_mask] = rgb_image[background_mask]
-
-    return rgb_saturated
-
-
-# DEPRECATED---use saturateImage instead
-def hueImgAsRgb(hsv_image):
-    hue = hsv_image[:,:,0]
-    ONE = m.np.ones_like(hue)
-
-    new_hsv = m.np.zeros_like(hsv_image)
-    new_hsv[:,:,0] = hue
-    new_hsv[:,:,1] = ONE
-    new_hsv[:,:,2] = ONE
-
-    return color.hsv2rgb(new_hsv)
-
-
 def fitPlane(
         depth_image, is_inlier, residual_threshold, camera_params=None, camera_pose=None,
         **ransac_kwargs):
@@ -550,6 +683,76 @@ def fitPlane(
     plane_distance_image = imageFromForegroundPixels(plane_distance, is_inlier)
 
     return plane, plane_distance_image
+
+
+# -=( 2D GEOMETRY )==----------------------------------------------------------
+def imageIntervals(image_shape):
+    intervals = tuple((0, size - 1) for size in image_shape)
+    return intervals
+
+
+def imageMidpoint(image_shape, integer_divide=False):
+    if integer_divide:
+        return m.np.array([dim_size // 2 for dim_size in image_shape])
+    return m.np.array([dim_size / 2 for dim_size in image_shape])
+
+
+def projectIntoImage(pixel_coords, image_shape):
+    intervals = imageIntervals(image_shape)
+    return geometry.projectIntoVolume(pixel_coords, *intervals)
+
+
+def rectangle_perimeter(r_bounds, c_bounds, shape=None, clip=False):
+    rr = [r_bounds[0], r_bounds[1], r_bounds[1], r_bounds[0]]
+    cc = [c_bounds[0], c_bounds[0], c_bounds[1], c_bounds[1]]
+    return draw.polygon_perimeter(rr, cc, shape=shape, clip=clip)
+
+
+def nonzeroRange(collection):
+    """ return min nonzero index and max nonzero index """
+    if not any(collection):
+        return tuple()
+
+    min_idx = collection.min()
+    max_idx = collection.max()
+
+    return min_idx, max_idx
+
+
+# -=( MASKING )==--------------------------------------------------------------
+def majorityVote(labels, min_snr=None, min_signal_count=None):
+    if min_snr is not None and min_signal_count is not None:
+        err_str = 'Only one of min_snr and min_signal_count can be passed!'
+        raise ValueError(err_str)
+
+    # background_count = m.np.sum(labels == 0)
+    noise_count = m.np.sum(labels == 1) + m.np.sum(labels == 2)
+    signal_count = m.np.sum(labels == 3)
+
+    if not signal_count and not noise_count:
+        return 0
+
+    if not noise_count:
+        return 3
+
+    if not signal_count:
+        return 2
+
+    if signal_count > noise_count:
+        return 3
+
+    if min_snr is not None:
+        snr = signal_count / noise_count
+        if snr > min_snr:
+            return 1
+        return 2
+
+    if min_signal_count is not None:
+        if signal_count > min_signal_count:
+            return 1
+        return 2
+
+    return 1
 
 
 def maskDepthArtifacts(depth_image, lower_bound=0, upper_bound=750):
@@ -705,24 +908,194 @@ def maskOutsideBuildArea(label_image, mask_left_side=0.3, mask_bottom=0.4):
     return label_image
 
 
-def shiftHue(hue_img):
-    hue_rows, hue_cols = hue_img.shape
-    should_shift = hue_img > 0.5
-    shifted_hue = hue_img.ravel() - 1
+def maskBackground(rgb_image, depth_image):
+    hsv = color.rgb2hsv(rgb_image)
+    hue_as_rgb = hueImgAsRgb(hsv)
 
-    shifted_hue[~should_shift.ravel()] = hue_img.ravel()[~should_shift.ravel()]
-    shifted_hue = shifted_hue.reshape(hue_rows, hue_cols)
-    return shifted_hue
+    background_mask = makeBackgroundMask(depth_image)
+    background_mask = maskOutsideBuildArea(background_mask)
+
+    rgb_foreground = hue_as_rgb.copy()
+    rgb_foreground[background_mask] = 0
+
+    return img_as_float(rgb_foreground)
 
 
-def invShiftHue(hue_img):
-    hue_rows, hue_cols = hue_img.shape
-    should_shift = hue_img < 0
-    shifted_hue = hue_img.ravel() + 1
+# -=( SUPERPIXELS)==-----------------------------------------------------------
+def makeSuperpixelImage(
+        superpixels, hsv_image, quantized_hue=None, as_hsv=False):
+    hue = shiftHue(hsv_image[:,:,0])
+    # sat = hsv_image[:,:,1]
+    # val = hsv_image[:,:,2]
 
-    shifted_hue[~should_shift.ravel()] = hue_img.ravel()[~should_shift.ravel()]
-    shifted_hue = shifted_hue.reshape(hue_rows, hue_cols)
-    return shifted_hue
+    if quantized_hue is not None:
+        quantized_hue = shiftHue(quantized_hue)
+
+    num_superpixels = superpixels.max() + 1
+    superpixel_image = m.np.zeros_like(hsv_image)
+
+    for superpixel_index in range(1, num_superpixels):
+        superpixel_mask = superpixels == superpixel_index
+
+        hue_patch = hue[superpixel_mask]
+        # sat_patch = sat[superpixel_mask]
+        # val_patch = val[superpixel_mask]
+
+        if quantized_hue is None:
+            # superpixel_image[:,:,0][superpixel_mask] = m.np.median(hue_patch)
+            superpixel_image[:,:,0][superpixel_mask] = hue_patch
+        else:
+            superpixel_image[:,:,0][superpixel_mask] = quantized_hue[superpixel_mask]
+        # superpixel_image[:,:,1][superpixel_mask] = m.np.median(sat_patch)
+        superpixel_image[:,:,1][superpixel_mask] = 1
+        # superpixel_image[:,:,2][superpixel_mask] = m.np.median(val_patch)
+        superpixel_image[:,:,2][superpixel_mask] = 1
+
+    superpixel_image[:,:,0] = invShiftHue(superpixel_image[:,:,0])
+
+    if as_hsv:
+        return superpixel_image
+
+    return color.hsv2rgb(superpixel_image)
+
+
+def mergeSuperpixels(
+        superpixels, rgb_frame, sat_frame, depth_frame,
+        rgb_thresh=55, sat_thresh=0.20, depth_thresh=25):
+
+    if rgb_thresh >= 0:
+        rgb_rag = graph.rag_mean_color(rgb_frame, superpixels)
+        sp_merged_rgb = graph.cut_threshold(superpixels, rgb_rag, rgb_thresh)
+        sp_joined = sp_merged_rgb
+
+    if sat_thresh >= 0:
+        sat_rag = graph.rag_mean_color(sat_frame, superpixels)
+        sp_merged_sat = graph.cut_threshold(superpixels, sat_rag, sat_thresh)
+        if rgb_thresh >= 0:
+            sp_joined = segmentation.join_segmentations(
+                sp_joined, sp_merged_sat)
+
+    if depth_thresh >= 0:
+        depth_rag = graph.rag_mean_color(depth_frame, superpixels)
+        sp_merged_depth = graph.cut_threshold(
+            superpixels, depth_rag, depth_thresh)
+        if sat_thresh >= 0:
+            sp_joined = segmentation.join_segmentations(
+                sp_joined, sp_merged_depth)
+
+    return sp_joined
+
+
+# -=( SEGMENT PROCESSING )==---------------------------------------------------
+def getImageSegments(rgb_image, label_image):
+    num_labels = label_image.max() + 1
+    f = functools.partial(getImageSegment, rgb_image, label_image)
+    return tuple(f(i) for i in range(1, num_labels))
+
+
+def getImageSegment(image, label_image, label_index):
+    pixel_coords = getPixelCoords(label_image, label_index)
+    pix_vals = image[pixel_coords[:,0], pixel_coords[:,1]]
+    return pix_vals
+
+
+def removeLargeObjects(label_image, max_size=750):
+    relabeled = label_image.copy()
+
+    num_labels = relabeled.max() + 1
+    for label_index in range(1, num_labels):
+        matching_pixels = label_image == label_index
+        num_matching = matching_pixels.sum()
+        if num_matching > max_size:
+            relabeled[matching_pixels] = 0
+
+    relabeled, __, __ = segmentation.relabel_sequential(relabeled)
+    return relabeled
+
+
+def segmentBoundingBox(label_img, label_index):
+    """
+
+    Parameters
+    ----------
+    label_img :
+    label_index :
+    """
+
+    if not label_img.any():
+        return tuple()
+
+    nonzero_rows, nonzero_cols = matchingPixels(label_img, label_index)
+    row_range = nonzeroRange(nonzero_rows)
+    col_range = nonzeroRange(nonzero_cols)
+
+    return row_range, col_range
+
+
+def segmentBoundingBoxes(rgb_img, label_img=None):
+    # Make a label image if one wasn't passed
+    if label_img is None:
+        label_img, num_labels = labelsFromRgb(rgb_img)
+    else:
+        num_labels = label_img.max() + 1
+
+    bb = functools.partial(segmentBoundingBox, label_img)
+    bboxes = tuple(bb(i) for i in range(1, num_labels))
+    return tuple(filter(None, bboxes))
+
+
+def labelsFromRgb(rgb_img):
+    channel_sum = rgb_img.sum(2)
+    label_img, num_labels = morphology.label(channel_sum != 0, return_num=True)
+
+    return label_img, num_labels
+
+
+# -=( DEPRECATED )==-----------------------------------------------------------
+def featureFilter(num_pix, avg_depth, std_depth, avg_hue, avg_sat, med_sat):
+    if med_sat < 0.1:
+        return True
+
+    if med_sat > 0.4 and med_sat < 0.6:
+        return True
+
+    if num_pix > 1500 and std_depth > 0.7:
+        return True
+
+    return False
+
+
+def sizeFilter(num_pix, avg_depth, std_depth, avg_hue, avg_sat, med_sat):
+    if num_pix > 750:
+        return True
+
+    return False
+
+
+def hueImgAsRgb(hsv_image):
+    hue = hsv_image[:,:,0]
+    ONE = m.np.ones_like(hue)
+
+    new_hsv = m.np.zeros_like(hsv_image)
+    new_hsv[:,:,0] = hue
+    new_hsv[:,:,1] = ONE
+    new_hsv[:,:,2] = ONE
+
+    return color.hsv2rgb(new_hsv)
+
+
+def shift(img, interval_length=1.0):
+    """ shift a range of data from [0, interval_length] to
+    [-interval_length/2, interval_length/2]
+    """
+
+    midpoint = interval_length / 2
+
+    shifted = img.copy()
+    shifted[shifted > midpoint] -= interval_length
+    shifted[shifted < -midpoint] += interval_length
+
+    return shifted
 
 
 def makeObjectLabels(
@@ -759,41 +1132,6 @@ def makeObjectLabels(
             depth_thresh=depth_thresh)
 
     return superpixels
-
-
-def majorityVote(labels, min_snr=None, min_signal_count=None):
-    if min_snr is not None and min_signal_count is not None:
-        err_str = 'Only one of min_snr and min_signal_count can be passed!'
-        raise ValueError(err_str)
-
-    # background_count = m.np.sum(labels == 0)
-    noise_count = m.np.sum(labels == 1) + m.np.sum(labels == 2)
-    signal_count = m.np.sum(labels == 3)
-
-    if not signal_count and not noise_count:
-        return 0
-
-    if not noise_count:
-        return 3
-
-    if not signal_count:
-        return 2
-
-    if signal_count > noise_count:
-        return 3
-
-    if min_snr is not None:
-        snr = signal_count / noise_count
-        if snr > min_snr:
-            return 1
-        return 2
-
-    if min_signal_count is not None:
-        if signal_count > min_signal_count:
-            return 1
-        return 2
-
-    return 1
 
 
 def maskDepth(is_nuisance, min_snr=None):
@@ -915,335 +1253,6 @@ def segmentObject(points, num_segments):
     kmeans = cluster.KMeans(n_clusters=num_segments)
     kmeans.fit(points)  # .reshape(-1,1))
     return kmeans.labels_
-
-
-def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
-    hue_image = hsv_image[:,:,0].copy()
-    sat_image = hsv_image[:,:,1].copy()
-    val_image = hsv_image[:,:,2].copy()
-
-    hue_image = shiftHue(hue_image)
-
-    num_superpixels = superpixel_image.max() + 1
-    hue_labels = m.np.zeros_like(superpixel_image)
-    quantized_hue = m.np.zeros_like(hue_image)
-
-    for superpixel_index in range(1, num_superpixels):
-        superpixel_mask = superpixel_image == superpixel_index
-
-        hue_patch = hue_image[superpixel_mask]
-        sat_patch = sat_image[superpixel_mask]
-        val_patch = val_image[superpixel_mask]
-
-        if m.np.median(sat_patch) < sat_thresh:
-            continue
-
-        if m.np.median(val_patch) < val_thresh:
-            continue
-
-        closest_hue_name = closestHue(hue_patch, defn.hue_name_dict)
-        if closest_hue_name in defn.nuisance_hue_names:
-            continue
-
-        closest_hue_label = defn.hue_label_dict[closest_hue_name] + 1
-        closest_hue = defn.hue_name_dict[closest_hue_name]
-        hue_labels[superpixel_mask] = closest_hue_label
-        quantized_hue[superpixel_mask] = closest_hue
-
-    quantized_hue = invShiftHue(quantized_hue)
-    return quantized_hue, hue_labels
-
-
-def closestHue(hue_patch, hue_dict):
-    med_hue = m.np.median(hue_patch)
-
-    best_hue_name = None
-    best_hue_dist = m.np.inf
-    for hue_name, hue in hue_dict.items():
-        hue_dist = abs(med_hue - hue)
-        if hue_dist < best_hue_dist:
-            best_hue_name = hue_name
-            best_hue_dist = hue_dist
-
-    return best_hue_name
-
-
-def makeSuperpixelImage(
-        superpixels, hsv_image, quantized_hue=None, as_hsv=False):
-    hue = shiftHue(hsv_image[:,:,0])
-    # sat = hsv_image[:,:,1]
-    # val = hsv_image[:,:,2]
-
-    if quantized_hue is not None:
-        quantized_hue = shiftHue(quantized_hue)
-
-    num_superpixels = superpixels.max() + 1
-    superpixel_image = m.np.zeros_like(hsv_image)
-
-    for superpixel_index in range(1, num_superpixels):
-        superpixel_mask = superpixels == superpixel_index
-
-        hue_patch = hue[superpixel_mask]
-        # sat_patch = sat[superpixel_mask]
-        # val_patch = val[superpixel_mask]
-
-        if quantized_hue is None:
-            # superpixel_image[:,:,0][superpixel_mask] = m.np.median(hue_patch)
-            superpixel_image[:,:,0][superpixel_mask] = hue_patch
-        else:
-            superpixel_image[:,:,0][superpixel_mask] = quantized_hue[superpixel_mask]
-        # superpixel_image[:,:,1][superpixel_mask] = m.np.median(sat_patch)
-        superpixel_image[:,:,1][superpixel_mask] = 1
-        # superpixel_image[:,:,2][superpixel_mask] = m.np.median(val_patch)
-        superpixel_image[:,:,2][superpixel_mask] = 1
-
-    superpixel_image[:,:,0] = invShiftHue(superpixel_image[:,:,0])
-
-    if as_hsv:
-        return superpixel_image
-
-    return color.hsv2rgb(superpixel_image)
-
-
-def mergeSuperpixels(
-        superpixels, rgb_frame, sat_frame, depth_frame,
-        rgb_thresh=55, sat_thresh=0.20, depth_thresh=25):
-
-    if rgb_thresh >= 0:
-        rgb_rag = graph.rag_mean_color(rgb_frame, superpixels)
-        sp_merged_rgb = graph.cut_threshold(superpixels, rgb_rag, rgb_thresh)
-        sp_joined = sp_merged_rgb
-
-    if sat_thresh >= 0:
-        sat_rag = graph.rag_mean_color(sat_frame, superpixels)
-        sp_merged_sat = graph.cut_threshold(superpixels, sat_rag, sat_thresh)
-        if rgb_thresh >= 0:
-            sp_joined = segmentation.join_segmentations(
-                sp_joined, sp_merged_sat)
-
-    if depth_thresh >= 0:
-        depth_rag = graph.rag_mean_color(depth_frame, superpixels)
-        sp_merged_depth = graph.cut_threshold(
-            superpixels, depth_rag, depth_thresh)
-        if sat_thresh >= 0:
-            sp_joined = segmentation.join_segmentations(
-                sp_joined, sp_merged_depth)
-
-    return sp_joined
-
-
-def shift(img, interval_length=1.0):
-    """ shift a range of data from [0, interval_length] to
-    [-interval_length/2, interval_length/2]
-    """
-
-    midpoint = interval_length / 2
-
-    shifted = img.copy()
-    shifted[shifted > midpoint] -= interval_length
-    shifted[shifted < -midpoint] += interval_length
-
-    return shifted
-
-
-def removeLargeObjects(label_image, max_size=750):
-    relabeled = label_image.copy()
-
-    num_labels = relabeled.max() + 1
-    for label_index in range(1, num_labels):
-        matching_pixels = label_image == label_index
-        num_matching = matching_pixels.sum()
-        if num_matching > max_size:
-            relabeled[matching_pixels] = 0
-
-    relabeled, __, __ = segmentation.relabel_sequential(relabeled)
-    return relabeled
-
-
-def imageIntervals(image_shape):
-    intervals = tuple((0, size - 1) for size in image_shape)
-    return intervals
-
-
-def imageMidpoint(image_shape, integer_divide=False):
-    if integer_divide:
-        return m.np.array([dim_size // 2 for dim_size in image_shape])
-    return m.np.array([dim_size / 2 for dim_size in image_shape])
-
-
-def projectIntoImage(pixel_coords, image_shape):
-    intervals = imageIntervals(image_shape)
-    return geometry.projectIntoVolume(pixel_coords, *intervals)
-
-
-def rectangle_perimeter(r_bounds, c_bounds, shape=None, clip=False):
-    rr = [r_bounds[0], r_bounds[1], r_bounds[1], r_bounds[0]]
-    cc = [c_bounds[0], c_bounds[0], c_bounds[1], c_bounds[1]]
-    return draw.polygon_perimeter(rr, cc, shape=shape, clip=clip)
-
-
-def templateGradient(T, V, U, theta, viz=False):
-    Ur, Uc = utils.splitColumns(U)
-
-    Tr, Tc = imgGradient(T)
-
-    if viz:
-        logger.info('U: {} {}'.format(U.any(), U))
-        tr_img = m.np.abs(Tr)
-        displayImages(tr_img, m.np.abs(Tc))
-        tr_img[Ur, Uc] = [1, 0, 1]
-        displayImages(tr_img)
-
-    if len(T.shape) > 2:
-        Tr = Tr.sum(2)
-        Tc = Tc.sum(2)
-
-    dT_dtr = Tr[Ur, Uc]
-    dT_dtc = Tc[Ur, Uc]
-    dT_dt = m.np.column_stack((dT_dtr, dT_dtc))
-
-    dR_dtheta = geometry.rDot(theta)
-    dT_dtheta = m.np.sum(dT_dt * (V @ m.np.transpose(dR_dtheta)), 1)
-
-    return dT_dtr, dT_dtc, dT_dtheta
-
-
-def nonzeroRange(collection):
-    """ return min nonzero index and max nonzero index """
-    if not any(collection):
-        return tuple()
-
-    min_idx = collection.min()
-    max_idx = collection.max()
-
-    return min_idx, max_idx
-
-
-def matchingPixels(reference_image, match_value=None):
-    """ Find the coordinates of pixels matching a particular value.
-
-    Parameters
-    ----------
-    reference_image : numpy array, shape (img_height, img_width, num_channels)
-        This image will be matched against `match_value`.
-    match_value : int, optional
-        If a value is passed for this argument, the function returns the
-        coordinates of pixels matching this value in the input. If not, the
-        function returns the coordinates of all nonzero pixels in the input.
-
-    Returns
-    -------
-    nonzero_rows :
-    nonzero_cols :
-    """
-
-    # Reduce an RGB image along its channel dimension
-    if len(reference_image.shape) > 2:
-        reference_image = reference_image.sum(2)
-
-    if match_value is not None:
-        reference_image = reference_image == match_value
-
-    nonzero_rows, nonzero_cols = m.np.nonzero(reference_image)
-    return nonzero_rows, nonzero_cols
-
-
-def segmentBoundingBox(rgb_img, label_img=None, label_index=None):
-    """
-
-    Parameters
-    ----------
-    rgb_img :
-    label_img :
-    label_index :
-    """
-
-    if not label_img.any():
-        return tuple()
-
-    nonzero_rows, nonzero_cols = matchingPixels(label_img, label_index)
-    row_range = nonzeroRange(nonzero_rows)
-    col_range = nonzeroRange(nonzero_cols)
-
-    return row_range, col_range
-
-
-def segmentBoundingBoxes(rgb_img, label_img=None):
-    # Make a label image if one wasn't passed
-    if label_img is None:
-        label_img, num_labels = labelsFromRgb(rgb_img)
-    else:
-        num_labels = label_img.max() + 1
-
-    bb = functools.partial(segmentBoundingBox, rgb_img, label_img)
-    bboxes = tuple(bb(i) for i in range(1, num_labels))
-    return tuple(filter(None, bboxes))
-
-
-def labelsFromRgb(rgb_img):
-    channel_sum = rgb_img.sum(2)
-    label_img, num_labels = morphology.label(channel_sum != 0, return_num=True)
-
-    return label_img, num_labels
-
-
-def maskBackground(rgb_image, depth_image):
-    hsv = color.rgb2hsv(rgb_image)
-    hue_as_rgb = hueImgAsRgb(hsv)
-
-    background_mask = makeBackgroundMask(depth_image)
-    background_mask = maskOutsideBuildArea(background_mask)
-
-    rgb_foreground = hue_as_rgb.copy()
-    rgb_foreground[background_mask] = 0
-
-    return img_as_float(rgb_foreground)
-
-
-def featureFilter(num_pix, avg_depth, std_depth, avg_hue, avg_sat, med_sat):
-    if med_sat < 0.1:
-        return True
-
-    if med_sat > 0.4 and med_sat < 0.6:
-        return True
-
-    if num_pix > 1500 and std_depth > 0.7:
-        return True
-
-    return False
-
-
-def sizeFilter(num_pix, avg_depth, std_depth, avg_hue, avg_sat, med_sat):
-    if num_pix > 750:
-        return True
-
-    return False
-
-
-def quantizeImage(model, rgb_image, foreground_label_image):
-    # Convert image to HSV space because cluster centers are in HSV space
-    hsv_image = color.rgb2hsv(rgb_image)
-
-    # Make a background mask
-    in_foreground = foreground_label_image != 0
-    foreground_pixels = hsv_image[in_foreground, :]
-
-    # Assign each foreground pixel to the nearest cluster center
-    cluster_labels = model.predict(foreground_pixels)
-    quantized_hsv = model.cluster_centers_[cluster_labels]
-
-    # Make an image displaying the segmentation
-    cluster_label_image = m.np.zeros(foreground_label_image.shape, dtype=int)
-    cluster_label_image[in_foreground] = cluster_labels + 1
-
-    # Make a quantized image
-    quantized_hsv_image = m.np.zeros_like(hsv_image)
-    quantized_hsv_image[in_foreground] = quantized_hsv
-
-    # Convert from HSV to RGB
-    quantized_rgb_image = color.hsv2rgb(quantized_hsv_image)
-
-    return quantized_rgb_image, cluster_label_image
 
 
 vote = functools.partial(majorityVote, min_snr=0.25)
