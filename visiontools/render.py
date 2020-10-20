@@ -196,7 +196,10 @@ class TorchSceneRenderer(nr.Renderer):
         """
 
         if camera_pose is None:
-            camera_pose = geometry.homogeneousMatrix(self.R[0], self.t[0][0])
+            # FIXME
+            R = self.R[0].cpu().numpy()
+            t = self.t[0][0].cpu().numpy()
+            camera_pose = torch.tensor(geometry.homogeneousMatrix(R, t)).float().cuda()
 
         if camera_params is None:
             camera_params = self.K[0]
@@ -220,7 +223,7 @@ class TorchSceneRenderer(nr.Renderer):
             rgb_images = torch.cat((rgb_bkgrnd, rgb_images), 0)
             depth_images = torch.cat((depth_bkgrnd, depth_images), 0)
 
-        rgb_image, depth_image = reduceByDepth(rgb_images, depth_images)
+        rgb_image, depth_image, label_image = reduceByDepth(rgb_images, depth_images)
 
         if as_numpy:
             rgb_image = rgb_image.detach().cpu().numpy()
@@ -270,7 +273,7 @@ class TorchSceneRenderer(nr.Renderer):
             rgb_images = torch.cat((background_images[0], rgb_images), 0)
             depth_images = torch.cat((background_images[1], depth_images), 0)
 
-        rgb_image, depth_image = reduceByDepth(rgb_images, depth_images)
+        rgb_image, depth_image, label_image = reduceByDepth(rgb_images, depth_images)
 
         return rgb_image, depth_image
 
