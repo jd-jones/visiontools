@@ -5,6 +5,7 @@ import os
 import numpy as np
 from scipy.spatial.qhull import QhullError
 import torch
+import neural_renderer as nr
 
 import mathtools as m
 from mathtools import utils
@@ -126,7 +127,191 @@ def loadCameraParams(
 intrinsic_matrix, camera_pose, object_colors = loadCameraParams()
 
 
+class TorchSceneRenderer(nr.Renderer):
+    def __init__(self, intrinsic_matrix=None, camera_pose=None, colors=None, **super_kwargs):
+        K = intrinsic_matrix
+        K = K[None, :, :].cuda()
+
+        R, t = geometry.fromHomogeneous(camera_pose)
+        R = R[None, :, :].float().cuda()
+        t = t[None, None, :].float().cuda()
+
+        self.colors = colors
+
+        super().__init__(
+            camera_mode='projection', K=K, R=R, t=t, orig_size=IMAGE_WIDTH,
+            near=0, far=1000, **super_kwargs
+        )
+
+    def render(self, vertices, faces, textures, intrinsic_matrix=None, camera_pose=None):
+        """ Wrapper around a differentiable renderer implemented in pytorch.
+        Parameters
+        ----------
+        Returns
+        -------
+        image
+        """
+
+        if intrinsic_matrix is None:
+            K = None
+        else:
+            K = intrinsic_matrix
+            K = K[None, :, :].cuda()
+
+        if camera_pose is None:
+            R = None
+            t = None
+        else:
+            R, t = geometry.fromHomogeneous(camera_pose)
+            R = R[None, :, :].float().cuda()
+            t = t[None, None, :].float().cuda()
+
+        if len(vertices.shape) == 2:
+            # [num_vertices, XYZ] -> [batch_size=1, num_vertices, XYZ]
+            vertices = vertices[None, ...]
+
+        if len(faces.shape) == 2:
+            # [num_faces, 3] -> [batch_size=1, num_faces, 3]
+            faces = faces[None, ...]
+
+        if len(textures.shape) == 5:
+            textures = textures[None, ...]
+
+        images_rgb, images_depth, images_alpha = super().render(vertices, faces, textures)
+
+        # [batch_size, RGB, image_size, image_size] -> [batch_size, image_size, image_size, RGB]
+        images_rgb = images_rgb.permute(0, 2, 3, 1)
+
+        return images_rgb, images_depth
+
+    def renderScene(
+            self, background_plane, assembly, component_poses,
+            camera_pose=None, camera_params=None, render_background=True,
+            as_numpy=False):
+        """ Render a scene consisting of a spatial assembly and a background plane.
+        Parameters
+        ----------
+        Returns
+        -------
+        """
+
+        if camera_pose is None:
+            camera_pose = geometry.homogeneousMatrix(self.R[0], self.t[0][0])
+
+        if camera_params is None:
+            camera_params = self.K[0]
+
+        if render_background:
+            rgb_bkgrnd, depth_bkgrnd = self.renderPlane(
+                background_plane, camera_pose=camera_pose, camera_params=camera_params
+            )
+
+        if not assembly.blocks:
+            return rgb_bkgrnd, depth_bkgrnd
+
+        assembly = assembly.setPose(component_poses, in_place=False)
+
+        vertices = makeBatch(assembly.vertices, dtype=torch.float).cuda()
+        faces = makeBatch(assembly.faces, dtype=torch.int).cuda()
+        textures = makeBatch(assembly.textures, dtype=torch.float).cuda()
+
+        rgb_images, depth_images = self.render(vertices, faces, textures)
+        if render_background:
+            rgb_images = torch.cat((rgb_bkgrnd, rgb_images), 0)
+            depth_images = torch.cat((depth_bkgrnd, depth_images), 0)
+
+        rgb_image, depth_image = reduceByDepth(rgb_images, depth_images)
+
+        if as_numpy:
+            rgb_image = rgb_image.detach().cpu().numpy()
+            depth_image = depth_image.detach().cpu().numpy()
+
+        return rgb_image, depth_image
+
+    def renderPlane(self, plane, camera_pose=None, camera_params=None):
+        if camera_pose is None:
+            camera_pose = geometry.homogeneousMatrix(self.R[0], self.t[0][0])
+
+        if camera_params is None:
+            camera_params = self.K[0]
+
+        vertices, faces = planeVertices(plane, camera_pose, camera_params)
+        textures = makeTextures(faces, uniform_color=self.colors['black'])
+        rgb_image, depth_image = self.render(vertices, faces, textures)
+
+        return rgb_image, depth_image
+
+    def renderComponent(self, assembly, component_index, component_pose, background_images=None):
+        """
+        Parameters
+        ----------
+        background_images : tuple(
+            array of float, shape (img_height, img_width, 3),
+            array of shape (img_height, img_width)
+        )
+            Elements should be as follows:
+            0 --- RGB image
+            1 --- Depth image
+        Returns
+        -------
+        """
+
+        assembly = assembly.recenter(component_index, in_place=False)
+
+        vertices = makeBatch(assembly.componentVertices(component_index), dtype=torch.float).cuda()
+        faces = makeBatch(assembly.componentFaces(component_index), dtype=torch.int).cuda()
+        textures = makeBatch(assembly.componentTextures(component_index), dtype=torch.float).cuda()
+
+        R, t = component_pose
+        vertices = vertices @ R.T + t
+
+        rgb_images, depth_images = self.render(vertices, faces, textures)
+        if background_images is not None:
+            rgb_images = torch.cat((background_images[0], rgb_images), 0)
+            depth_images = torch.cat((background_images[1], depth_images), 0)
+
+        rgb_image, depth_image = reduceByDepth(rgb_images, depth_images)
+
+        return rgb_image, depth_image
+
+
+class LegacySceneRenderer(object):
+    def __init__(self, intrinsic_matrix=None, camera_pose=None, colors=None, **super_kwargs):
+        self.intrinsic_matrix = intrinsic_matrix
+        self.camera_pose = camera_pose
+        self.colors = colors
+
+    def renderScene(self, background_plane, assembly, component_poses):
+        out = renderScene(
+            background_plane, assembly, component_poses,
+            camera_pose=self.camera_pose, camera_params=self.intrinsic_matrix,
+            object_appearances=self.colors
+        )
+        return out
+
+    def renderPlane(self, plane):
+        out = renderPlane(
+            plane, camera_pose=None, camera_params=None, plane_appearance=None,
+            range_image=None, label_image=None, rgb_image=None
+        )
+        return out
+
+    def renderComponent(self, assembly, component_idx):
+        out = renderComponent(
+            assembly, component_idx, component_pose=None, img_type=None,
+            camera_pose=None, camera_params=None, block_colors=None,
+            range_image=None, label_image=None, rgb_image=None,
+            crop_rendered=False, in_place=True
+        )
+        return out
+
+
 # -=( HELPER FUNCTIONS FOR PYTORCH RENDERER )==--------------------------------
+def makeBatch(arrays, **tensor_kwargs):
+    batch = torch.stack(tuple(torch.tensor(a, **tensor_kwargs) for a in arrays))
+    return batch
+
+
 def reduceByDepth(rgb_images, depth_images):
     """ For each pixel in a scene, select the object closest to the camera.
 
@@ -628,7 +813,7 @@ def zBufferConvexPolygon(
         face_coords_camera[1, :] = plane._t + plane._U[:, 0]
         face_coords_camera[2, :] = plane._t + plane._U[:, 0] + plane._U[:, 1]
     else:
-        err_str = f"This function requires either face_coords_image or face_coords_world"
+        err_str = "This function requires either face_coords_image or face_coords_world"
         raise ValueError(err_str)
 
     bounding_box = geometry.boundingBox(face_coords_image, range_image.shape)
