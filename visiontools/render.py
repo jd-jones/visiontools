@@ -139,7 +139,7 @@ class TorchSceneRenderer(nr.Renderer):
         self.colors = colors
 
         super().__init__(
-            camera_mode='projection', K=K, R=R, t=t, orig_size=IMAGE_WIDTH,
+            camera_mode='projection', K=K, R=R, t=t,
             near=0, far=1000, **super_kwargs
         )
 
@@ -330,15 +330,23 @@ def reduceByDepth(rgb_images, depth_images):
     label_image : torch.tensor of int, shape (img_height, img_width)
     """
 
-    label_image = depth_images.argmin(0)
-    num_rows, num_cols = label_image.shape
-    r, c = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols))
+    label_image = depth_images.argmin(-3)
+    new_shape = label_image.shape
+
+    num_batch = new_shape[0]
+    num_rows, num_cols = new_shape[-2:]
+    b, r, c = torch.meshgrid(
+        torch.arange(num_batch),
+        torch.arange(num_rows),
+        torch.arange(num_cols)
+    )
     i_min = label_image.contiguous().view(-1)
+    b = b.contiguous().view(-1)
     r = r.contiguous().view(-1)
     c = c.contiguous().view(-1)
 
-    depth_image = depth_images[i_min, r, c].view(num_rows, num_cols)
-    rgb_image = rgb_images[i_min, r, c, :].view(num_rows, num_cols, -1)
+    depth_image = depth_images[b, i_min, r, c].view(*new_shape)
+    rgb_image = rgb_images[b, i_min, r, c, :].view(*new_shape, 3)
 
     return rgb_image, depth_image, label_image
 
