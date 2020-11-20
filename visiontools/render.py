@@ -5,7 +5,14 @@ import os
 import numpy as np
 from scipy.spatial.qhull import QhullError
 import torch
-import neural_renderer as nr
+try:
+    import neural_renderer as nr
+except ImportError:
+    class DummyModule(object):
+        Renderer = object
+
+    nr = DummyModule()
+
 
 import mathtools as m
 from mathtools import utils
