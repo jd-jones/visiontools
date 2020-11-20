@@ -540,6 +540,9 @@ def renderPlane(
         img_size = (IMAGE_HEIGHT, IMAGE_WIDTH)
         label_image = np.zeros(img_size, dtype=int)
 
+    if plane_appearance is None:
+        plane_appearance = np.zeros(3)
+
     face_coords = np.array([
         [0, 0],
         [0, range_image.shape[0]],

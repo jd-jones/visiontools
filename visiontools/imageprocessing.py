@@ -4,17 +4,16 @@ import functools
 import warnings
 
 from matplotlib import pyplot as plt
-from skimage import color, feature, measure, morphology, segmentation
+from skimage import color, feature, morphology, segmentation
 from skimage import transform, draw, filters, img_as_float
 from skimage.future import graph
 from sklearn import cluster
+import numpy as np
 
-import mathtools as m
 from mathtools import utils
 # FIXME: Remove dependency on definitions
 from blocks.core import definitions as defn
-
-from . import render, geometry
+from visiontools import geometry
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +58,7 @@ def imageFromForegroundPixels(
     """
 
     if not foreground_pixels.any():
-        return m.np.zeros(foreground_labels.shape, dtype=foreground_pixels.dtype)
+        return np.zeros(foreground_labels.shape, dtype=foreground_pixels.dtype)
 
     if background_class_index is None:
         is_foreground = foreground_labels
@@ -71,7 +70,7 @@ def imageFromForegroundPixels(
         num_channels = foreground_pixels.shape[1]
         image_dims += (num_channels,)
 
-    image = m.np.zeros(image_dims, dtype=foreground_pixels.dtype)
+    image = np.zeros(image_dims, dtype=foreground_pixels.dtype)
     image[is_foreground] = foreground_pixels
 
     if image_transform is not None:
@@ -158,7 +157,7 @@ def matchingPixels(reference_image, match_value=None):
     if match_value is not None:
         reference_image = reference_image == match_value
 
-    nonzero_rows, nonzero_cols = m.np.nonzero(reference_image)
+    nonzero_rows, nonzero_cols = np.nonzero(reference_image)
     return nonzero_rows, nonzero_cols
 
 
@@ -195,6 +194,7 @@ def displayImages(*images, num_rows=1, figsize=None, file_path=None):
         return
 
     f, axes = plt.subplots(num_rows, num_cols, figsize=figsize)
+
     for axis, img in zip(axes.ravel(), images):
         axis.imshow(img)
         axis.axis('off')
@@ -207,18 +207,26 @@ def displayImages(*images, num_rows=1, figsize=None, file_path=None):
         plt.close()
 
 
-def displayImage(image):
-    plt.figure(figsize=(10, 6))
+def displayImage(image, figsize=None, file_path=None):
+    if figsize is None:
+        figsize = (10, 6)
+
+    plt.figure(figsize=figsize)
     plt.imshow(image)
     plt.axis('off')
     plt.tight_layout()
-    plt.show()
+
+    if file_path is None:
+        plt.show()
+    else:
+        plt.savefig(file_path)
+        plt.close()
 
 
 def getPixelCoords(label_image, label_index):
     matches_label = label_image == label_index
-    rows_and_cols = m.np.nonzero(matches_label)
-    return m.np.column_stack(rows_and_cols)
+    rows_and_cols = np.nonzero(matches_label)
+    return np.column_stack(rows_and_cols)
 
 
 # -=( COLOR SPACE PROCESSING )==-----------------------------------------------
@@ -250,8 +258,8 @@ def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
     hue_image = shiftHue(hue_image)
 
     num_superpixels = superpixel_image.max() + 1
-    hue_labels = m.np.zeros_like(superpixel_image)
-    quantized_hue = m.np.zeros_like(hue_image)
+    hue_labels = np.zeros_like(superpixel_image)
+    quantized_hue = np.zeros_like(hue_image)
 
     for superpixel_index in range(1, num_superpixels):
         superpixel_mask = superpixel_image == superpixel_index
@@ -260,10 +268,10 @@ def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
         sat_patch = sat_image[superpixel_mask]
         val_patch = val_image[superpixel_mask]
 
-        if m.np.median(sat_patch) < sat_thresh:
+        if np.median(sat_patch) < sat_thresh:
             continue
 
-        if m.np.median(val_patch) < val_thresh:
+        if np.median(val_patch) < val_thresh:
             continue
 
         closest_hue_name = closestHue(hue_patch, defn.hue_name_dict)
@@ -280,10 +288,10 @@ def quantizeHue(superpixel_image, hsv_image, sat_thresh=0.4, val_thresh=0.25):
 
 
 def closestHue(hue_patch, hue_dict):
-    med_hue = m.np.median(hue_patch)
+    med_hue = np.median(hue_patch)
 
     best_hue_name = None
-    best_hue_dist = m.np.inf
+    best_hue_dist = np.inf
     for hue_name, hue in hue_dict.items():
         hue_dist = abs(med_hue - hue)
         if hue_dist < best_hue_dist:
@@ -306,11 +314,11 @@ def quantizeImage(model, rgb_image, foreground_label_image):
     quantized_hsv = model.cluster_centers_[cluster_labels]
 
     # Make an image displaying the segmentation
-    cluster_label_image = m.np.zeros(foreground_label_image.shape, dtype=int)
+    cluster_label_image = np.zeros(foreground_label_image.shape, dtype=int)
     cluster_label_image[in_foreground] = cluster_labels + 1
 
     # Make a quantized image
-    quantized_hsv_image = m.np.zeros_like(hsv_image)
+    quantized_hsv_image = np.zeros_like(hsv_image)
     quantized_hsv_image[in_foreground] = quantized_hsv
 
     # Convert from HSV to RGB
@@ -319,7 +327,7 @@ def quantizeImage(model, rgb_image, foreground_label_image):
     return quantized_rgb_image, cluster_label_image
 
 
-def saturateImage(rgb_image, background_mask=None):
+def saturateImage(rgb_image, background_mask=None, to_float=True):
     """ Convert to HSV, set saturation and value to max, and convert back to RGB.
 
     If the input image is in integer format (values in [0, 255]), it is first
@@ -337,7 +345,8 @@ def saturateImage(rgb_image, background_mask=None):
         Saturated copy of the input, in float format.
     """
 
-    rgb_image = img_as_float(rgb_image)
+    if to_float:
+        rgb_image = img_as_float(rgb_image)
 
     # Convert to HSV space
     with warnings.catch_warnings():
@@ -346,8 +355,8 @@ def saturateImage(rgb_image, background_mask=None):
 
     # Saturate in HSV space
     hue = hsv_image[:, :, 0]
-    ONE = m.np.ones_like(hue)
-    hsv_saturated = m.np.dstack((hue, ONE, ONE))
+    ONE = np.ones_like(hue)
+    hsv_saturated = np.dstack((hue, ONE, ONE))
 
     # Convert back to RGB space
     with warnings.catch_warnings():
@@ -365,12 +374,12 @@ def imgGradient(img, sigma=None):
     """ Return image gradients in the row and column directions. """
 
     # gradient in X direction (cols)
-    aug_img = m.np.hstack((img[:,0:1], img))
-    grad_c = m.np.diff(aug_img, 1)
+    aug_img = np.hstack((img[:,0:1], img))
+    grad_c = np.diff(aug_img, 1)
 
     # gradient in Y direction (rows)
-    aug_img = m.np.vstack((img[0:1,:], img))
-    grad_r = m.np.diff(aug_img, 0)
+    aug_img = np.vstack((img[0:1,:], img))
+    grad_r = np.diff(aug_img, 0)
 
     if sigma is not None:
         grad_c = filters.gaussian(grad_c, sigma=sigma, multichannel=True)
@@ -386,8 +395,8 @@ def templateGradient(T, V, U, theta, viz=False):
 
     if viz:
         logger.info('U: {} {}'.format(U.any(), U))
-        tr_img = m.np.abs(Tr)
-        displayImages(tr_img, m.np.abs(Tc))
+        tr_img = np.abs(Tr)
+        displayImages(tr_img, np.abs(Tc))
         tr_img[Ur, Uc] = [1, 0, 1]
         displayImages(tr_img)
 
@@ -397,10 +406,10 @@ def templateGradient(T, V, U, theta, viz=False):
 
     dT_dtr = Tr[Ur, Uc]
     dT_dtc = Tc[Ur, Uc]
-    dT_dt = m.np.column_stack((dT_dtr, dT_dtc))
+    dT_dt = np.column_stack((dT_dtr, dT_dtc))
 
     dR_dtheta = geometry.rDot(theta)
-    dT_dtheta = m.np.sum(dT_dt * (V @ m.np.transpose(dR_dtheta)), 1)
+    dT_dtheta = np.sum(dT_dt * (V @ np.transpose(dR_dtheta)), 1)
 
     return dT_dtr, dT_dtc, dT_dtheta
 
@@ -411,7 +420,7 @@ def sse(observed, predicted, is_img=False):
     Compute the sum of squared errors (SSE) measure for predicting `predicted`
     when we really see `observed`.
 
-    FIXME: Because it calls m.np.linalg.norm, this function actually computes the
+    FIXME: Because it calls np.linalg.norm, this function actually computes the
         square root of the SSE metric.
 
     Parameters
@@ -452,9 +461,9 @@ def sse(observed, predicted, is_img=False):
     if len(residual.shape) > 2:
         sse = 0
         for i in range(residual.shape[2]):
-            sse += m.np.linalg.norm(residual[:,:,i], ord='fro')
+            sse += np.linalg.norm(residual[:,:,i], ord='fro')
     else:
-        sse = m.np.linalg.norm(residual)
+        sse = np.linalg.norm(residual)
 
     return sse
 
@@ -559,11 +568,11 @@ def estimateSegmentPose(
         Vector reptresenting the segment's estimated 3D position (in mm)
     """
 
-    pixel_coords = m.np.column_stack(m.np.nonzero(segment_mask))
+    pixel_coords = np.column_stack(np.nonzero(segment_mask))
     depth = depth_image[pixel_coords[:,0], pixel_coords[:,1]]
 
     world_coords = backprojectPixels(
-        camera_params, camera_pose, m.np.flip(pixel_coords, axis=1), depth
+        camera_params, camera_pose, np.flip(pixel_coords, axis=1), depth
     )
 
     R, t = geometry.estimatePose(
@@ -612,15 +621,15 @@ def backprojectPixels(camera_params, camera_pose, pixel_coords, depths, in_camer
         camera_params, A_property='diag', range_space_homogeneous=True
     )
 
-    camera_coords_scaled = geometry.homogeneousVector(pixel_coords) @ m.np.transpose(backproject)
-    camera_coords = camera_coords_scaled * m.np.column_stack((depths, depths, depths))
+    camera_coords_scaled = geometry.homogeneousVector(pixel_coords) @ np.transpose(backproject)
+    camera_coords = camera_coords_scaled * np.column_stack((depths, depths, depths))
 
     if in_camera_coords:
         return camera_coords
 
     # Convert pixel coordinates to the world frame
     inv_camera_pose = geometry.invertHomogeneous(camera_pose, A_property='ortho')
-    world_coords = geometry.homogeneousVector(camera_coords) @ m.np.transpose(inv_camera_pose)
+    world_coords = geometry.homogeneousVector(camera_coords) @ np.transpose(inv_camera_pose)
 
     if len(world_coords.shape) > 1:
         world_coords = world_coords[:, 0:3].squeeze()
@@ -634,55 +643,9 @@ def backprojectSegment(camera_params, depth_image, label_image, label_index):
     pixel_coords = getPixelCoords(label_image, label_index)
     z_coords = depth_image[pixel_coords[:,0], pixel_coords[:,1]]
     metric_coords = backprojectPixels(
-        camera_params, m.np.flip(pixel_coords, axis=1), z_coords
+        camera_params, np.flip(pixel_coords, axis=1), z_coords
     )
     return metric_coords
-
-
-def fitPlane(
-        depth_image, is_inlier, residual_threshold, camera_params=None, camera_pose=None,
-        **ransac_kwargs):
-    """ Fit a plane to a depth image using RANSAC.
-
-    Parameters
-    ----------
-    camera_image : numpy array of float, shape (img_height, img_width)
-    is_inlier : numpy array of bool, shape (img_height, img_width)
-    residual_threshold : float
-        Required by RANSAC. RANSAC classifies any point with residual error
-        greater than this threshold as an outlier.
-    **ransac_kwargs : optional
-        Any extra keyword arguments are passed to `skimage.measure.ransac`.
-
-    Returns
-    -------
-    plane : geometry.Plane
-    plane_distance_image : numpy array of float, shape (img_height, img_width)
-    """
-
-    if camera_params is None:
-        camera_params = render.intrinsic_matrix
-
-    if camera_pose is None:
-        camera_pose = render.camera_pose
-
-    # Backproject the depth image to world coordinates
-    pixel_coords = m.np.column_stack(m.np.nonzero(is_inlier))
-    depth_coords = depth_image[pixel_coords[:,0], pixel_coords[:,1]]
-    camera_coords = backprojectPixels(
-        camera_params, camera_pose, m.np.flip(pixel_coords, axis=1), depth_coords,
-        in_camera_coords=True
-    )
-
-    # Fit plane
-    plane, ransac_inliers = measure.ransac(
-        camera_coords, geometry.Plane, 3, residual_threshold,
-        **ransac_kwargs
-    )
-    plane_distance = plane.residuals(camera_coords)
-    plane_distance_image = imageFromForegroundPixels(plane_distance, is_inlier)
-
-    return plane, plane_distance_image
 
 
 # -=( 2D GEOMETRY )==----------------------------------------------------------
@@ -693,8 +656,8 @@ def imageIntervals(image_shape):
 
 def imageMidpoint(image_shape, integer_divide=False):
     if integer_divide:
-        return m.np.array([dim_size // 2 for dim_size in image_shape])
-    return m.np.array([dim_size / 2 for dim_size in image_shape])
+        return np.array([dim_size // 2 for dim_size in image_shape])
+    return np.array([dim_size / 2 for dim_size in image_shape])
 
 
 def projectIntoImage(pixel_coords, image_shape):
@@ -725,9 +688,9 @@ def majorityVote(labels, min_snr=None, min_signal_count=None):
         err_str = 'Only one of min_snr and min_signal_count can be passed!'
         raise ValueError(err_str)
 
-    # background_count = m.np.sum(labels == 0)
-    noise_count = m.np.sum(labels == 1) + m.np.sum(labels == 2)
-    signal_count = m.np.sum(labels == 3)
+    # background_count = np.sum(labels == 0)
+    noise_count = np.sum(labels == 1) + np.sum(labels == 2)
+    signal_count = np.sum(labels == 3)
 
     if not signal_count and not noise_count:
         return 0
@@ -786,112 +749,6 @@ def maskDepthArtifacts(depth_image, lower_bound=0, upper_bound=750):
     return is_depth_artifact
 
 
-def makeBackgroundMask(
-        depth_image,
-        background_mask,
-        sigma=1, l_thresh=0, h_thresh=1000,
-        axis_tol=0.1, hough_thresh_ratio=0.4,
-        x_max_thresh=0.1, y_min_thresh=0.75):
-    """ Return a mask array that identifies the background of the input image.
-
-    Parameters
-    ----------
-    depth_image : numpy array of float, shape (img_height, img_width)
-    sigma : float, optional
-    l_thresh : int, optional
-    h_thresh : int, optional
-    axis_tol : float, optional
-    hough_thresh_ratio : float, optional
-    x_max_thresh : float, optional
-        If a vertical line is detected to the left of `x_max_thresh` in the
-        image, this function masks the left side of the output up to that line.
-        You can disable this masking by setting `x_max_thresh` < 0.
-    y_min_thresh : float, optional
-        If a horizontal line is detected below `y_min_thresh` in the
-        image, this function masks the bottom of the output up to that line.
-        You can disable this masking by setting `y_min_thresh` > 1.
-
-    Returns
-    -------
-    background_mask : numpy array of bool, shape (img_height, img_width)
-    """
-
-    # Find rudimentary edges in the image
-    masked_image = depth_image.copy()
-    masked_image[background_mask] = 0
-    edges = feature.canny(
-        masked_image,
-        sigma=sigma,
-        low_threshold=l_thresh,
-        high_threshold=h_thresh
-    )
-
-    # The lower-left border comes from two straight metal bars
-    lower_left_border = maskLowerLeftBorder(
-        edges,
-        axis_tol=axis_tol, hough_thresh_ratio=hough_thresh_ratio,
-        x_max_thresh=x_max_thresh, y_min_thresh=y_min_thresh
-    )
-    background_mask |= lower_left_border
-
-    # Close the mask to remove holes
-    # closed = morphology.binary_closing(background_mask)
-    # background_mask |= closed
-
-    return background_mask
-
-
-def maskLowerLeftBorder(
-        edge_image, axis_tol=0.1, hough_thresh_ratio=0.4,
-        x_max_thresh=0.1, y_min_thresh=0.75, margin=10):
-    """ Mask the lower-left border of an image by finding edges.
-
-    Parameters
-    ----------
-    edge_image : numpy array of bool, shape (img_height, img_width)
-    axis_tol : float, optional
-    hough_thresh_ratio : float, optional
-    x_max_thresh : float, optional
-    y_min_thresh : float, optional
-    margin : int, optional
-
-    Returns
-    -------
-    hough_mask : numpy array of bool, shape (img_height, img_width)
-    """
-
-    num_rows, num_cols = edge_image.shape
-
-    x_mid = num_cols / 2
-    y_mid = num_rows / 2
-    x_max = x_max_thresh * num_cols
-    y_min = y_min_thresh * num_rows
-
-    hough_mask = m.np.zeros_like(edge_image, dtype=bool)
-
-    # Detect lines using the Hough transform
-    h, theta, d = transform.hough_line(edge_image)
-    __, angles, dists = transform.hough_line_peaks(
-        h, theta, d,
-        threshold=hough_thresh_ratio * h.max()
-    )
-
-    # Filter Hough lines and mask the border if appropriate
-    for angle, dist in zip(angles, dists):
-        if geometry.axisAligned(angle, tol=axis_tol, axis='horizontal'):
-            y = geometry.solveLine(angle, dist, x=x_mid)
-            if y > y_min:
-                hough_mask[int(y) - margin:, :] = True
-        elif geometry.axisAligned(angle, tol=axis_tol, axis='vertical'):
-            x = geometry.solveLine(angle, dist, y=y_mid)
-            if x < x_max:
-                hough_mask[:, :int(x) + margin] = True
-        else:
-            continue
-
-    return hough_mask
-
-
 def maskOutsideBuildArea(label_image, mask_left_side=0.3, mask_bottom=0.4):
     """ Segment the frame into three rectangles. """
 
@@ -932,7 +789,7 @@ def makeSuperpixelImage(
         quantized_hue = shiftHue(quantized_hue)
 
     num_superpixels = superpixels.max() + 1
-    superpixel_image = m.np.zeros_like(hsv_image)
+    superpixel_image = np.zeros_like(hsv_image)
 
     for superpixel_index in range(1, num_superpixels):
         superpixel_mask = superpixels == superpixel_index
@@ -942,13 +799,13 @@ def makeSuperpixelImage(
         # val_patch = val[superpixel_mask]
 
         if quantized_hue is None:
-            # superpixel_image[:,:,0][superpixel_mask] = m.np.median(hue_patch)
+            # superpixel_image[:,:,0][superpixel_mask] = np.median(hue_patch)
             superpixel_image[:,:,0][superpixel_mask] = hue_patch
         else:
             superpixel_image[:,:,0][superpixel_mask] = quantized_hue[superpixel_mask]
-        # superpixel_image[:,:,1][superpixel_mask] = m.np.median(sat_patch)
+        # superpixel_image[:,:,1][superpixel_mask] = np.median(sat_patch)
         superpixel_image[:,:,1][superpixel_mask] = 1
-        # superpixel_image[:,:,2][superpixel_mask] = m.np.median(val_patch)
+        # superpixel_image[:,:,2][superpixel_mask] = np.median(val_patch)
         superpixel_image[:,:,2][superpixel_mask] = 1
 
     superpixel_image[:,:,0] = invShiftHue(superpixel_image[:,:,0])
@@ -1074,9 +931,9 @@ def sizeFilter(num_pix, avg_depth, std_depth, avg_hue, avg_sat, med_sat):
 
 def hueImgAsRgb(hsv_image):
     hue = hsv_image[:,:,0]
-    ONE = m.np.ones_like(hue)
+    ONE = np.ones_like(hue)
 
-    new_hsv = m.np.zeros_like(hsv_image)
+    new_hsv = np.zeros_like(hsv_image)
     new_hsv[:,:,0] = hue
     new_hsv[:,:,1] = ONE
     new_hsv[:,:,2] = ONE
@@ -1119,7 +976,7 @@ def makeObjectLabels(
         hue_coeff * shift(hue_image))
 
     any_thresh = rgb_thresh >= 0 or sat_thresh >= 0 or depth_thresh >= 0
-    if m.np.any(superpixels) and any_thresh:
+    if np.any(superpixels) and any_thresh:
         rgb_masked = rgb_image.copy()
         rgb_masked[label_mask == 0] = 0
         sat_masked = sat_image.copy()
@@ -1156,8 +1013,8 @@ def maskDepth(is_nuisance, min_snr=None):
 
 
 def maskNuisance(labels, min_snr=None):
-    num_signal = m.np.sum(labels == 3)
-    num_noise = m.np.sum(labels == 2) + m.np.sum(labels == 1)
+    num_signal = np.sum(labels == 3)
+    num_noise = np.sum(labels == 2) + np.sum(labels == 1)
 
     if not num_noise:
         return False
@@ -1182,7 +1039,7 @@ def maskLargeSegments(labels, max_num_pixels=3000):
 
 
 def filterObjects(label_img, img, filter_func, num_labels):
-    new_img = m.np.zeros_like(img)
+    new_img = np.zeros_like(img)
     for i in range(1, num_labels + 1):
         filterObject(label_img, img, filter_func, new_img, i)
 
@@ -1224,7 +1081,7 @@ def segmentObjects(label_mask, num_seg_pixels=200, *images):
         err_str = 'At least one image must be supplied!'
         raise ValueError(err_str)
 
-    segmented_labels = m.np.zeros_like(label_mask)
+    segmented_labels = np.zeros_like(label_mask)
     num_objects = label_mask.max() + 1
     offset = 1
 
@@ -1234,12 +1091,12 @@ def segmentObjects(label_mask, num_seg_pixels=200, *images):
         num_segments = int(object_mask.sum() / num_seg_pixels)
         num_segments = max(num_segments, 1)
 
-        pixel_indices = m.np.argwhere(object_mask)
+        pixel_indices = np.argwhere(object_mask)
         points = [pixel_indices]
         for image in images:
             img_points = image[object_mask].reshape(-1, 1)
             points.append(img_points)
-        points = m.np.hstack(tuple(points))
+        points = np.hstack(tuple(points))
 
         segments = segmentObject(points, num_segments)
 
