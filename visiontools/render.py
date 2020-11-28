@@ -322,7 +322,7 @@ def makeBatch(arrays, **tensor_kwargs):
     return batch
 
 
-def reduceByDepth(rgb_images, depth_images):
+def reduceByDepth(rgb_images, depth_images, max_depth=None):
     """ For each pixel in a scene, select the object closest to the camera.
 
     Parameters
@@ -354,6 +354,11 @@ def reduceByDepth(rgb_images, depth_images):
 
     depth_image = depth_images[b, i_min, r, c].view(*new_shape)
     rgb_image = rgb_images[b, i_min, r, c, :].view(*new_shape, 3)
+
+    if max_depth is not None:
+        label_image += 1
+        is_background = depth_image == max_depth
+        label_image[is_background] = 0
 
     return rgb_image, depth_image, label_image
 
