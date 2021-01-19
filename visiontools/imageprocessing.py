@@ -190,7 +190,7 @@ def displayImages(*images, num_rows=1, figsize=None, file_path=None):
         return
 
     if num_images == 1:
-        displayImage(images[0])
+        displayImage(images[0], figsize=figsize, file_path=file_path)
         return
 
     f, axes = plt.subplots(num_rows, num_cols, figsize=figsize)
