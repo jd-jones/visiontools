@@ -2,6 +2,7 @@ import logging
 import operator
 import functools
 import warnings
+import math
 
 from matplotlib import pyplot as plt
 from skimage import color, feature, morphology, segmentation
@@ -162,7 +163,7 @@ def matchingPixels(reference_image, match_value=None):
 
 
 # -=( VISUALIZATION )==--------------------------------------------------------
-def displayImages(*images, num_rows=1, figsize=None, file_path=None):
+def displayImages(*images, num_rows=1, num_cols=None, figsize=None, file_path=None):
     """ Display images in a horizontally-oriented array  using matplotlib.
 
     Parameters
@@ -179,10 +180,14 @@ def displayImages(*images, num_rows=1, figsize=None, file_path=None):
     """
 
     num_images = len(images)
-    num_cols = num_images // num_rows
+    if num_cols is None:
+        num_cols = math.ceil(num_images / num_rows)
+    if num_rows is None:
+        num_rows = math.ceil(num_images / num_cols)
 
     if figsize is None:
-        figsize = (5 * num_cols, 3 * num_rows)
+        # figsize = (5 * num_cols, 3 * num_rows)
+        figsize = (3 * num_cols, 3 * num_rows)
 
     if num_images == 0:
         warn_str = 'No image arguments provided!'
@@ -203,7 +208,7 @@ def displayImages(*images, num_rows=1, figsize=None, file_path=None):
     if file_path is None:
         plt.show()
     else:
-        plt.savefig(file_path)
+        plt.savefig(file_path, bbox_inches='tight')
         plt.close()
 
 
